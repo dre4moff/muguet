@@ -1,12 +1,16 @@
-# Muguet fork r3 (0.1.3)
+# Muguet fork r4 (0.1.4)
 
 This fork starts from c22dev/Muguet commit `63737647eb3f7fee2e2139995606e3b02a5920ee`. The original author, copyright notices, GPL-3.0-or-later license, and vendored MIT/Apache licenses are retained. This is an independent modification by dre4moff, not an official Rockstar or upstream release.
+
+## Performance investigation
+
+r4 adopts upstream's Binaryen `wasm-opt -O3` preprocessing before iOS native compilation (patching hooks/exports first). It also removes a per-draw uniform allocation and redundant full-block copy while preserving zero padding and all rendering inputs. Its opt-in HUD adds native renderer/process CPU time, command-ring waits, existing GPU fence waits, drawable acquisition, submission/uniform costs, readback/group counts, I/O service cost and bounded asynchronous GPU pass timestamps. See [PERFORMANCE.md](PERFORMANCE.md) for exact definitions and limitations. No iPhone FPS gain is claimed by host checks. Controller and 5 GiB heap policy remain unchanged.
 
 ## Original rendering restored
 
 The experimental MetalFX integration from r1/r2 has been completely removed after the owner reported reduced clarity and FPS. r2 kept the selected input dimensions but multiplied reconstruction dimensions, increasing output pixels by 2.25× or 4×. It also added an image-motion search, full-frame conversion, history copying and cross-queue synchronization. It lacked engine-provided geometry motion vectors; its low-cost synthetic correctness tests did not establish quality or performance for the game on iPhone.
 
-The source establishes extra GPU work and unreliable motion reconstruction. It does not establish that the numerical game input resolution actually fell; the reported appearance can also result from incorrect temporal reconstruction. No reliable device-validated repair is available with the current data, so r3 returns to the upstream vertex, pipeline, draw and presentation code. The HUD only observes that path. The extra scaler, shader jitter, motion/history buffers, native exports, framework link, launch selector and configuration handling are gone. Old saved scaler keys are removed when the launcher saves settings; they cannot enable any rendering code in r3. Resolution and texture settings remain available.
+The source establishes extra GPU work and unreliable motion reconstruction. It does not establish that the numerical game input resolution actually fell; the reported appearance can also result from incorrect temporal reconstruction. No reliable device-validated repair is available with the current data, so r3 returns to the upstream vertex, pipeline, draw and presentation code. r4 retains the original rendering inputs and adds the bounded optimization and diagnostics described above. The extra scaler, shader jitter, motion/history buffers, native exports, framework link, launch selector and configuration handling are gone. Old saved scaler keys are removed when the launcher saves settings; they cannot enable any rendering code in r3. Resolution and texture settings remain available.
 
 ## Launcher options
 
@@ -32,16 +36,16 @@ The extracted game data continues to occupy storage. During import, both ZIP and
 
 ## Personal unsigned build
 
-Use your own original `game.wasm`; no game files or download source is included in this repository. Requires Xcode, XcodeGen, Rust 1.98.1 and the `aarch64-apple-ios` target. The script keeps generated files in `.build`, uses two build jobs, and reserves at least 15 GiB of free space.
+Use your own original `game.wasm`; no game files or download source is included in this repository. Requires Xcode, XcodeGen, Binaryen (`wasm-opt`, tested with 133), Rust 1.98.1 and the `aarch64-apple-ios` target. The script keeps generated files in `.build`, uses two build jobs, and reserves at least 15 GiB of free space.
 
 ```sh
 # The script uses local Rust/Cargo homes in .build:
 RUSTUP_HOME="$PWD/.build/rustup-home" CARGO_HOME="$PWD/.build/cargo-home" \
   rustup toolchain install 1.98.1 --profile minimal --target aarch64-apple-ios
-python3 tools/build-unsigned.py /path/to/your/game.wasm --xcodegen /path/to/xcodegen
+python3 tools/build-unsigned.py /path/to/your/game.wasm --xcodegen /path/to/xcodegen --wasm-opt /path/to/wasm-opt
 ```
 
-Output: `.build/artifacts/fork-r3/Muguet-0.1.3-fork-r3-ios-arm64-unsigned.ipa` and SHA-256 evidence. The IPA is genuinely unsigned: signing and device installation are performed by the owner. Keep the upstream bundle identifier to preserve an existing installation's data (subject to your signing/install tool's behavior). The app retains the 5 GiB iOS heap ceiling and does not enable JIT. A current 3072 MiB heap means a 3 GiB linear-memory address range, not a 3 GiB process cap or necessarily 3 GiB of resident RAM. The ceiling does not force the game to allocate or use that much memory. Import the same compatible game-data ZIP; these changes do not require editing game-data files. One new pause-state export is added to the code embedded in the personal IPA.
+Output: `.build/artifacts/fork-r4/Muguet-0.1.4-fork-r4-ios-arm64-unsigned.ipa` and SHA-256 evidence. The IPA is genuinely unsigned: signing and device installation are performed by the owner. Keep the upstream bundle identifier to preserve an existing installation's data (subject to your signing/install tool's behavior). The app retains the 5 GiB iOS heap ceiling and does not enable JIT. A current 3072 MiB heap means a 3 GiB linear-memory address range, not a 3 GiB process cap or necessarily 3 GiB of resident RAM. The ceiling does not force the game to allocate or use that much memory. Import the same compatible game-data ZIP; these changes do not require editing game-data files. One new pause-state export is added to the code embedded in the personal IPA.
 
 ## iOS RAM and signing
 

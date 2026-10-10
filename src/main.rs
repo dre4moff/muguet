@@ -15,6 +15,7 @@ mod pad;
 mod controller;
 #[cfg(feature = "jit")]
 mod patch;
+mod perf;
 mod proto;
 mod server;
 #[cfg(target_os = "ios")]
@@ -140,9 +141,26 @@ fn main() -> Result<()> {
         config.target("aarch64-apple-ios").map_err(anyhow::Error::from)?;
         unsafe { config.cranelift_flag_enable("has_lse") };
         let engine = Engine::new(&config).map_err(anyhow::Error::from)?;
-        let patched = patch::patch(&std::fs::read(wasm)?, mp::COMMANDS)?;
+        let wasm_bytes = std::fs::read(wasm)?;
+        let patched = if patch::is_patched(&wasm_bytes) { wasm_bytes } else { patch::patch(&wasm_bytes, mp::COMMANDS)? };
         std::fs::write(out, engine.precompile_module(&patched).map_err(anyhow::Error::from)?)?;
         eprintln!("[host] precompiled {wasm} -> {out}");
+        return Ok(());
+    }
+    #[cfg(feature = "jit")]
+    if argv.get(1).map(String::as_str) == Some("--patch") {
+        let (wasm, out) = (argv.get(2).context("--patch <wasm> <out>")?, argv.get(3).context("--patch <wasm> <out>")?);
+        std::fs::write(out, patch::patch(&std::fs::read(wasm)?, mp::COMMANDS)?)?;
+        return Ok(());
+    }
+    #[cfg(feature = "jit")]
+    if argv.get(1).map(String::as_str) == Some("--check-optimized-wasm") {
+        let before = argv.get(2).context("--check-optimized-wasm <patched> <optimized>")?;
+        let after = argv.get(3).context("--check-optimized-wasm <patched> <optimized>")?;
+        let a = std::fs::read(before)?; let b = std::fs::read(after)?;
+        anyhow::ensure!(patch::is_patched(&a) && patch::is_patched(&b), "missing application hooks");
+        anyhow::ensure!(patch::contract(&a)? == patch::contract(&b)?, "optimizer changed exported/imported ABI");
+        eprintln!("Wasm validation passed; import/export ABI unchanged: {} -> {} bytes", a.len(), b.len());
         return Ok(());
     }
     let startup = match config::setup() {

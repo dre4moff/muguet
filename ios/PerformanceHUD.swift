@@ -40,6 +40,6 @@ public func muguetHUDUpdate(_ text: UnsafePointer<CChar>) {
         case .critical: thermal = "Critical"
         @unknown default: thermal = "Unknown"
         }
-        performanceLabel?.text = "  \(message.replacingOccurrences(of: "\n", with: "  \n  "))  \n  Thermal: \(thermal)  "
+        performanceLabel?.text = "  \(message.replacingOccurrences(of: "\n", with: "  \n  "))  \n  Thermal: \(thermal) · Low power: \(ProcessInfo.processInfo.isLowPowerModeEnabled ? "On" : "Off")  "
     }
 }

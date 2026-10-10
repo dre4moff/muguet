@@ -2,6 +2,7 @@
 // Constantin Clerc (c22dev) - 0.1
 
 use crate::mem_base_len;
+use crate::perf::{self, GpuTiming, Monitor};
 use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -348,6 +349,18 @@ fn parse_wgsl(text: &str) -> Info {
 struct PackMember { binding: u32, size: u64, offset: u64 }
 struct Pack { members: Vec<PackMember>, size: u64 }
 
+// Write straight into the existing staging ring: preserve zero padding/missing
+// constants on ring reuse, without a per-draw allocation and second full copy.
+fn pack_into<'a>(pack: &Pack, block: &mut [u8], mut source: impl FnMut(u32) -> Option<(&'a [u8], u64)>) {
+    block.fill(0);
+    for m in &pack.members {
+        if let Some((bytes, available)) = source(m.binding) {
+            let len = m.size.min(available).min(bytes.len() as u64) as usize;
+            if len > 0 { block[m.offset as usize..m.offset as usize + len].copy_from_slice(&bytes[..len]); }
+        }
+    }
+}
+
 fn pack_uniforms(text: &str) -> (String, Option<Pack>) {
     struct M { binding: u32, name: String, ty: String, size: u64 }
     let mut members: Vec<M> = Vec::new();
@@ -644,6 +657,8 @@ pub struct Gpu {
     surface: Option<(Surface<'static>, Arc<winit::window::Window>)>,
     surface_format: TextureFormat,
     surface_size: (u32, u32),
+    monitor: Monitor,
+    gpu_timing: Option<GpuTiming>,
     hud_time: Instant,
     hud_frames: u64,
     visible_frames: u64,
@@ -729,7 +744,7 @@ impl Gpu {
         let (base, _) = mem_base_len(&mem);
         let (instance, surface) = match handoff {
             Some(h) => (h.instance, Some((h.surface, h.window))),
-            None => { let mut d = InstanceDescriptor::new_without_display_handle(); d.backends = Backends::METAL; (Instance::new(d), None) }
+            None => { let mut d = InstanceDescriptor::new_without_display_handle(); d.backends = Backends::METAL; d.flags.insert(InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION); (Instance::new(d), None) }
         };
         let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
             power_preference: PowerPreference::HighPerformance,
@@ -742,7 +757,8 @@ impl Gpu {
             | Features::BGRA8UNORM_STORAGE | Features::DEPTH_CLIP_CONTROL | Features::CLIP_DISTANCES | Features::DUAL_SOURCE_BLENDING
 
             | Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
-        let features = want & adapter.features();
+        let profiling = perf::enabled();
+        let features = (want | if profiling { Features::TIMESTAMP_QUERY } else { Features::empty() }) & adapter.features();
         let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
             label: Some("muguet"),
             required_features: features,
@@ -799,7 +815,9 @@ impl Gpu {
             }
             Some(job_tx)
         };
+        let gpu_timing = if profiling { GpuTiming::new(&device) } else { None };
         Ok(Gpu {
+            monitor: Monitor::new(profiling), gpu_timing,
             hud_time: Instant::now(), hud_frames: 0, visible_frames: 0, hud_draws: 0,
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
@@ -925,7 +943,10 @@ impl Gpu {
         self.flush_uniforms();
         let resolves = if self.pending_resolve.is_empty() { None } else { self.record_resolves() };
         if let Some(enc) = self.enc.take() {
+            let started = self.monitor.start();
             let idx = self.queue.submit([enc.finish()]);
+            perf::add(&self.monitor.costs.submit, started);
+            if let Some(t) = &self.gpu_timing { t.arm_maps(); }
             self.last_submit = Some(idx);
             self.submits += 1;
             self.on_submitted();
@@ -948,6 +969,7 @@ impl Gpu {
                 while SUSPENDED.load(Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(50)); }
             }
             self.process_maps(false);
+            if let Some(t) = &mut self.gpu_timing { t.collect(&self.device); }
             if self.inflight.load(Ordering::SeqCst) > 0 {
                 let _ = self.device.poll(PollType::Poll);
             }
@@ -962,7 +984,9 @@ impl Gpu {
                     continue;
                 }
                 let timeout = if self.pending_maps.is_empty() && self.inflight.load(Ordering::SeqCst) == 0 { 100 } else { 1 };
+                let started = self.monitor.start();
                 let _ = self.mem.atomic_wait32(self.ring, tail as u32, Some(Duration::from_millis(timeout)));
+                perf::add(&self.monitor.costs.idle, started);
                 self.hdr(5).store(0, Ordering::SeqCst);
                 continue;
             }
@@ -1015,7 +1039,10 @@ impl Gpu {
             7 => self.present(u(0)),
             8 => {
                 self.flush();
+                let started = self.monitor.start();
                 let _ = self.device.poll(PollType::Wait { submission_index: None, timeout: None });
+                perf::add(&self.monitor.costs.fence, started);
+                self.monitor.costs.fences.set(self.monitor.costs.fences.get() + 1);
                 let addr = u(0) as u64 + u(1) as u64 * 4294967296;
                 atomic(&self.mem, addr).store(u(2) as i32, Ordering::SeqCst);
                 let _ = self.mem.atomic_notify(addr, u32::MAX);
@@ -1568,8 +1595,9 @@ impl Gpu {
             stencil_ops: if has_stencil(*f) && !ro_s { Some(Operations { load: ds_clear.and_then(|c| c.stencil).map(LoadOp::Clear).unwrap_or(LoadOp::Load), store: StoreOp::Store }) } else { None },
         });
         let occ = self.occlusion_set.clone();
+        let timing = self.gpu_timing.as_mut().and_then(GpuTiming::next);
         let pass = self.encoder().begin_render_pass(&RenderPassDescriptor {
-            label: None, color_attachments: &color_atts, depth_stencil_attachment: dsa, timestamp_writes: None,
+            label: None, color_attachments: &color_atts, depth_stencil_attachment: dsa, timestamp_writes: timing.as_ref().map(|t| t.render()),
             occlusion_query_set: occ.as_ref(), multiview_mask: None,
         }).forget_lifetime();
         self.pass = Some(pass);
@@ -1650,12 +1678,13 @@ impl Gpu {
             px.dirty = false;
             let passes: Vec<_> = px.passes.iter().map(|(v, b)| (v.clone(), b.clone())).collect();
             self.end_pass();
-            let enc = self.encoder();
             for (dst, bg) in &passes {
+                let timing = self.gpu_timing.as_mut().and_then(GpuTiming::next);
+                let enc = self.encoder();
                 let mut p = enc.begin_render_pass(&RenderPassDescriptor {
                     label: None,
                     color_attachments: &[Some(RenderPassColorAttachment { view: dst, depth_slice: None, resolve_target: None, ops: Operations { load: LoadOp::Clear(Color::BLACK), store: StoreOp::Store } })],
-                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                    depth_stencil_attachment: None, timestamp_writes: timing.as_ref().map(|t| t.render()), occlusion_query_set: None, multiview_mask: None,
                 });
                 p.set_pipeline(&pl);
                 p.set_bind_group(0, bg, &[]);
@@ -1702,12 +1731,13 @@ impl Gpu {
             px.dirty = false;
             let passes: Vec<_> = px.passes.iter().map(|(v, b)| (v.clone(), b.clone())).collect();
             self.end_pass();
-            let enc = self.encoder();
             for (dst, bg) in &passes {
+                let timing = self.gpu_timing.as_mut().and_then(GpuTiming::next);
+                let enc = self.encoder();
                 let mut p = enc.begin_render_pass(&RenderPassDescriptor {
                     label: None, color_attachments: &[],
                     depth_stencil_attachment: Some(RenderPassDepthStencilAttachment { view: dst, depth_ops: Some(Operations { load: LoadOp::Clear(1.0), store: StoreOp::Store }), stencil_ops: None }),
-                    timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                    timestamp_writes: timing.as_ref().map(|t| t.render()), occlusion_query_set: None, multiview_mask: None,
                 });
                 p.set_pipeline(&pl);
                 p.set_bind_group(0, bg, &[]);
@@ -1822,21 +1852,25 @@ impl Gpu {
             return None;
         }
         let (ci, off) = self.uniform_alloc(pack.size);
-        let mut block = vec![0u8; pack.size as usize];
-        for m in &pack.members {
-            let cb = self.s.cb[stage].get(m.binding as usize).cloned().unwrap_or_default();
-            if let Some(Buf { shadow: Some(sh), size, .. }) = self.buf(cb.buf) {
-                let from = cb.first as u64 * 16;
-                let len = m.size.min(size.saturating_sub(from));
-                if len > 0 {
-                    block[m.offset as usize..(m.offset + len) as usize].copy_from_slice(&sh[from as usize..(from + len) as usize]);
-                }
-            }
-        }
+        let started = self.monitor.start();
+        let objs = &self.objs;
+        let bindings = &self.s.cb[stage];
         let chunk = &mut self.ubo_slots[self.ubo_slot][ci];
         let end = (off + pack.size) as usize;
         if chunk.stage.len() < end { chunk.stage.resize((end.max(262144)).next_power_of_two().min(RING_CHUNK as usize), 0); }
-        chunk.stage[off as usize..end].copy_from_slice(&block);
+        pack_into(pack, &mut chunk.stage[off as usize..end], |binding| {
+            let cb = bindings.get(binding as usize).cloned().unwrap_or_default();
+            match objs.get(cb.buf as usize)?.as_ref()? {
+                Obj::Buf(Buf { shadow: Some(sh), size, .. }) => {
+                    let from = cb.first as u64 * 16;
+                    let len = size.saturating_sub(from);
+                    Some((sh.get(from as usize..).unwrap_or(&[]), len))
+                }
+                _ => None,
+            }
+        });
+        perf::add(&self.monitor.costs.uniform, started);
+        self.monitor.costs.uniform_bytes.set(self.monitor.costs.uniform_bytes.get() + pack.size);
         chunk.lo = chunk.lo.min(off);
         chunk.hi = chunk.hi.max(end as u64);
         Some((ci, off))
@@ -2005,6 +2039,7 @@ impl Gpu {
         }).collect();
         let bg = self.scoped(&format!("bind group {}", prog.label), |d| d.create_bind_group(&BindGroupDescriptor { label: None, layout: &bgl.0, entries: &wentries }))?;
         if self.bind_groups.len() > BG_LIMIT * 3 / 2 { self.bind_groups.clear(); }
+        self.monitor.costs.groups.set(self.monitor.costs.groups.get() + 1);
         let uid = self.uid();
         self.bind_groups.insert(key, (bg.clone(), uid));
         Some(BgResult { bg, uid, dyn_off })
@@ -2353,8 +2388,9 @@ impl Gpu {
         }
         let Some((pl, bgl, bgl_uid, cprog)) = self.compute.get(&key).cloned().flatten() else { self.skipped += 1; return };
         let Some(g0) = self.stage_bind_group(2, &cprog, 0, &(bgl, bgl_uid)) else { self.skipped += 1; return };
+        let timing = self.gpu_timing.as_mut().and_then(GpuTiming::next);
         let enc = self.encoder();
-        let mut cp = enc.begin_compute_pass(&ComputePassDescriptor::default());
+        let mut cp = enc.begin_compute_pass(&ComputePassDescriptor { label: None, timestamp_writes: timing.as_ref().map(|t| t.compute()) });
         cp.set_pipeline(&pl);
         match g0.dyn_off { Some(o) => cp.set_bind_group(0, &g0.bg, &[o]), None => cp.set_bind_group(0, &g0.bg, &[]) }
         cp.dispatch_workgroups(x, y, z);
@@ -2626,12 +2662,13 @@ impl Gpu {
             t.mip_passes = Some(passes);
         }
         let passes = t.mip_passes.clone().unwrap();
-        let enc = self.encoder();
         for (dst, bg) in &passes {
+            let timing = self.gpu_timing.as_mut().and_then(GpuTiming::next);
+            let enc = self.encoder();
             let mut p = enc.begin_render_pass(&RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(RenderPassColorAttachment { view: dst, depth_slice: None, resolve_target: None, ops: Operations { load: LoadOp::Clear(Color::BLACK), store: StoreOp::Store } })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                depth_stencil_attachment: None, timestamp_writes: timing.as_ref().map(|t| t.render()), occlusion_query_set: None, multiview_mask: None,
             });
             p.set_pipeline(&pl);
             p.set_bind_group(0, bg, &[]);
@@ -2642,6 +2679,7 @@ impl Gpu {
     }
 
     fn readback(&mut self, p: u64) {
+        self.monitor.costs.readbacks.set(self.monitor.costs.readbacks.get() + 1);
         let mb = self.base;
         let u = move |w: u64| unsafe { std::ptr::read_volatile(mb.add(((p + w) * 4) as usize) as *const u32) };
         let (src, sub, has_box) = (u(0), u(1), u(2) != 0);
@@ -2902,7 +2940,10 @@ impl Gpu {
                     dev.create_bind_group(&BindGroupDescriptor { label: None, layout: &blit.get_bind_group_layout(0), entries: &[BindGroupEntry { binding: 0, resource: BindingResource::TextureView(&v) }] })
                 }).clone()
             };
-            let frame = match self.surface.as_ref().unwrap().0.get_current_texture() {
+            let started = self.monitor.start();
+            let acquired = self.surface.as_ref().unwrap().0.get_current_texture();
+            perf::add(&self.monitor.costs.surface, started);
+            let frame = match acquired {
                 CurrentSurfaceTexture::Success(f) | CurrentSurfaceTexture::Suboptimal(f) => Some(f),
                 other => { log_once("surface", &format!("surface texture unavailable: {other:?}")); self.surface_size = (0, 0); None }
             };
@@ -2910,23 +2951,27 @@ impl Gpu {
                 let view = frame.texture.create_view(&TextureViewDescriptor::default());
                 self.use_tex(id);
                 {
+                    let timing = self.gpu_timing.as_mut().and_then(GpuTiming::next);
                     let enc = self.encoder();
                     let mut p = enc.begin_render_pass(&RenderPassDescriptor {
                         label: None,
                         color_attachments: &[Some(RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops: Operations { load: LoadOp::Clear(Color::BLACK), store: StoreOp::Store } })],
-                        depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                        depth_stencil_attachment: None, timestamp_writes: timing.as_ref().map(|t| t.render()), occlusion_query_set: None, multiview_mask: None,
                     });
                     p.set_pipeline(&blit);
                     p.set_bind_group(0, &bg, &[]);
                     p.draw(0..3, 0..1);
                 }
+                self.finish_profile_frame();
                 self.flush();
                 self.queue.present(frame);
                 self.visible_frames += 1;
             } else {
+                self.finish_profile_frame();
                 self.flush();
             }
         } else {
+            self.finish_profile_frame();
             self.flush();
         }
         self.collect_pipelines();
@@ -2940,14 +2985,25 @@ impl Gpu {
         self.ubo_chunk = 0;
         self.ubo_off = 0;
         if let Some(idx) = self.frame_slot_done[self.ubo_slot].take() {
+            let started = self.monitor.start();
             let _ = self.device.poll(PollType::Wait { submission_index: Some(idx), timeout: None });
+            perf::add(&self.monitor.costs.fence, started);
         }
         self.process_maps(false);
+        if let Some(t) = &mut self.gpu_timing { t.start_frame(self.presents); }
+    }
+
+    fn finish_profile_frame(&mut self) {
+        self.end_pass();
+        if self.gpu_timing.as_ref().map(|t| t.needs_finish()).unwrap_or(false) {
+            self.encoder();
+            if let (Some(timing), Some(enc)) = (&mut self.gpu_timing, &mut self.enc) { timing.finish(enc); }
+        }
     }
 
     fn update_hud(&mut self) {
         #[cfg(target_os = "ios")]
-        if std::env::var("MUGUET_PERFORMANCE_HUD").as_deref() == Ok("1") {
+        if self.monitor.enabled {
             let elapsed = self.hud_time.elapsed().as_secs_f64();
             if elapsed < 0.5 { return; }
             let frames = self.visible_frames - self.hud_frames;
@@ -2957,7 +3013,10 @@ impl Gpu {
             let memory = crate::footprint_mb();
             let available = crate::available_memory_mb();
             let heap = crate::RT.get().map(|r| r.mem.data_size() >> 20).unwrap_or(0);
+            let profile = self.monitor.report(frames, elapsed);
+            let gpu = self.gpu_timing.as_ref().map(|t| t.report()).unwrap_or_else(|| "GPU timestamps: unsupported".into());
             let message = format!("{fps:.1} FPS · {frame_ms:.1} ms/frame\nRAM used {memory} MiB · iOS headroom {available} MiB\niOS app budget ≈ {} MiB · linear heap {heap}/{} MiB\nSelected {}×{} · presented {}×{}\nDraws/frame {} · GPU validation errors {}\nController: {}", memory + available, crate::game_heap_limit_mb(), render.0, render.1, self.surface_size.0, self.surface_size.1, (self.draws-self.hud_draws)/frames.max(1), self.errors.load(Ordering::Relaxed), if crate::pad::ACTIVE.load(Ordering::Relaxed) { "Connected" } else { "None" });
+            let message = format!("{message}\n{profile}\n{gpu}");
             if let Ok(c) = std::ffi::CString::new(message) {
                 extern "C" { fn muguet_hud_update(text: *const std::ffi::c_char); }
                 unsafe { muguet_hud_update(c.as_ptr()); }
@@ -3033,6 +3092,54 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uniform_ring_reuse_preserves_original_packing() {
+        let bytes: Vec<u8> = (0..4096).map(|i| (i * 31) as u8).collect();
+        let pack = Pack { size: 512, members: vec![
+            PackMember { binding: 0, size: 128, offset: 0 },
+            PackMember { binding: 1, size: 64, offset: 128 },
+            PackMember { binding: 2, size: 192, offset: 256 },
+        ] };
+        let mut ring = vec![0xAA; pack.size as usize];
+        for frame in 0..256 {
+            let source = |binding| {
+                if binding == 1 || frame % 3 == 0 { None }
+                else { Some((&bytes[frame * 7..], if binding == 2 { 48 } else { 4096 - frame as u64 * 7 })) }
+            };
+            let mut original = vec![0u8; pack.size as usize];
+            for m in &pack.members {
+                if let Some((src, available)) = source(m.binding) {
+                    let n = m.size.min(available) as usize;
+                    original[m.offset as usize..m.offset as usize + n].copy_from_slice(&src[..n]);
+                }
+            }
+            pack_into(&pack, &mut ring, source);
+            assert_eq!(ring, original, "ring reuse frame {frame}");
+        }
+    }
+    #[test]
+    #[ignore = "host-only comparative microbenchmark; not an iPhone FPS test"]
+    fn uniform_packing_microbenchmark() {
+        use std::hint::black_box;
+        for size in [1024, 4096, 16384] {
+            let bytes = vec![123u8; size]; let pack = Pack { size: size as u64, members: vec![PackMember { binding: 0, size: size as u64, offset: 0 }] };
+            let mut staging = vec![0u8; size]; let mut results = vec![];
+            for _ in 0..5 {
+                let t = Instant::now();
+                for _ in 0..100_000 {
+                    let mut block = vec![0u8; black_box(size)];
+                    block.copy_from_slice(black_box(&bytes));
+                    staging.copy_from_slice(black_box(&block)); black_box(&staging);
+                }
+                let old = t.elapsed().as_secs_f64(); let t = Instant::now();
+                for _ in 0..100_000 {
+                    pack_into(black_box(&pack), &mut staging, |_| Some((black_box(&bytes), size as u64))); black_box(&staging);
+                }
+                results.push((old, t.elapsed().as_secs_f64()));
+            }
+            eprintln!("uniform benchmark {size} bytes, 100000 blocks, (original, direct) seconds: {results:?}");
+        }
+    }
     #[test]
     fn original_vertex_programs_pass_gpu_validation() {
         let mut descriptor = InstanceDescriptor::new_without_display_handle();

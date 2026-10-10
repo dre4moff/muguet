@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 use wasmtime::SharedMemory;
 
+pub static READ_NS: AtomicU64 = AtomicU64::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 const MAX_OPEN: usize = 1024;
 
@@ -47,6 +48,7 @@ pub fn start(mem: &SharedMemory, table: u64) {
 }
 
 fn serve_loop(mem: SharedMemory, table: u64) {
+    let profiling = crate::perf::enabled();
     let files = manifest_files();
     let root = data_dir();
     let mut handles: HashMap<i32, File> = HashMap::new();
@@ -65,6 +67,7 @@ fn serve_loop(mem: SharedMemory, table: u64) {
             let off = word(2) | (word(3) << 32);
             let dst = word(4) | (word(5) << 32);
             let mut len = word(6);
+            let read_start = profiling.then(std::time::Instant::now);
             let result: i64 = match files.get(id as usize) {
                 None => -1,
                 Some((path, size)) => {
@@ -99,6 +102,7 @@ fn serve_loop(mem: SharedMemory, table: u64) {
                     }
                 }
             };
+            if let Some(t) = read_start { READ_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed); }
             served += 1;
             if result > 0 { bytes += result as u64; }
             if served % 2000 == 0 {

@@ -66,6 +66,7 @@ impl ApplicationHandler for App {
         }
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::METAL;
+        desc.flags.insert(wgpu::InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION);
         let instance = wgpu::Instance::new(desc);
         let surface = instance.create_surface(window.clone()).expect("create surface");
         *gpu::SURFACE.lock().unwrap() = Some(gpu::SurfaceHandoff { instance, surface, window: window.clone() });

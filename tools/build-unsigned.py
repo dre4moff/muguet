@@ -17,6 +17,7 @@ def check(reserve_bytes=0):
     return {'passed': free - reserve_bytes >= 15 * 1024**3, 'free_bytes': free}
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('game_wasm', type=Path, help='Your own original game.wasm (never uploaded)')
+parser.add_argument('--wasm-opt', default=shutil.which('wasm-opt'), help='Binaryen wasm-opt; recommended upstream -O3 preprocessing')
 parser.add_argument('--xcodegen', default=shutil.which('xcodegen'), help='Path to XcodeGen')
 args = parser.parse_args()
 if not args.game_wasm.is_file() or args.game_wasm.suffix != '.wasm':
@@ -26,19 +27,19 @@ if not args.xcodegen:
 GAME_WASM = args.game_wasm.resolve()
 
 BUILD = ROOT / '.build'
-STATE = BUILD / 'logs/fork-r3-ipa-build-state.json'
+STATE = BUILD / 'logs/fork-r4-ipa-build-state.json'
 TOOLCHAIN = '1.98.1'
 GAME_CODE = BUILD / 'work/game.cwasm'
 TARGET = BUILD / 'target-ios'
 PROJECT = BUILD / 'work/ios-project'
 DERIVED = BUILD / 'xcode-derived-data'
 STAGE = BUILD / 'work/ipa-stage'
-IPA = BUILD / 'artifacts/fork-r3/Muguet-0.1.3-fork-r3-ios-arm64-unsigned.ipa'
+IPA = BUILD / 'artifacts/fork-r4/Muguet-0.1.4-fork-r4-ios-arm64-unsigned.ipa'
 ENV = os.environ.copy()
 ENV.update({
     'RUSTUP_HOME': str(BUILD / 'rustup-home'),
     'CARGO_HOME': str(BUILD / 'cargo-home'),
-    'CARGO_BUILD_JOBS': '2', 'RAYON_NUM_THREADS': '2',
+    'CARGO_BUILD_JOBS': '2', 'RAYON_NUM_THREADS': '2', 'BINARYEN_CORES': '2',
     'TMPDIR': str(BUILD / 'work'),
     'CLANG_MODULE_CACHE_PATH': str(BUILD / 'sdk-cache/clang'),
     'SWIFT_MODULE_CACHE_PATH': str(BUILD / 'sdk-cache/swift'),
@@ -55,7 +56,7 @@ def state(phase, **fields):
 def run(phase, command, reserve_mib=1024, env=None):
     if not check(reserve_mib * 1024**2)['passed']:
         raise RuntimeError(f'Disk guard stopped {phase}.')
-    log_path = BUILD / f'logs/r3-{phase}.log'
+    log_path = BUILD / f'logs/r4-{phase}.log'
     print(f'Starting {phase}.', flush=True)
     with log_path.open('wb') as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env or ENV,
@@ -84,7 +85,26 @@ try:
     host_env = ENV.copy()
     host_env.pop('RUSTFLAGS', None)
     run('fork-build-host', ['cargo', f'+{TOOLCHAIN}', 'build', '--locked', '--release', '--target-dir', str(BUILD / 'target-host'), '--jobs', '2'], 4096, host_env)
-    run('precompile-ios-game', [str(host), '--precompile-ios', str(GAME_WASM), str(GAME_CODE)], 4096)
+    compilation_input = GAME_WASM
+    optimizer_version = None
+    optimized_sha256 = None
+    if args.wasm_opt:
+        patched = BUILD / 'work/game.patched.wasm'
+        optimized = BUILD / 'work/game.optimized.wasm'
+        run('patch-ios-game', [str(host), '--patch', str(GAME_WASM), str(patched)], 4096)
+        optimizer = str(Path(args.wasm_opt).resolve())
+        optimizer_version = output([optimizer, '--version']).strip()
+        run('optimize-ios-game', [optimizer, str(patched), '-O3', '-g', '--enable-memory64', '--enable-threads',
+                                 '--enable-bulk-memory', '--enable-mutable-globals', '--enable-sign-ext',
+                                 '--enable-nontrapping-float-to-int', '--enable-simd', '--enable-multivalue',
+                                 '--enable-reference-types', '--enable-multimemory', '-o', str(optimized)], 8192)
+        run('validate-optimized-game', [str(host), '--check-optimized-wasm', str(patched), str(optimized)], 4096)
+        with optimized.open('rb') as inp:
+            optimized_sha256 = hashlib.file_digest(inp, 'sha256').hexdigest()
+        compilation_input = optimized
+    else:
+        print('wasm-opt not available: upstream -O3 preprocessing skipped.', flush=True)
+    run('precompile-ios-game', [str(host), '--precompile-ios', str(compilation_input), str(GAME_CODE)], 4096)
     ios_env = ENV.copy()
     ios_env['MUGUET_GAME_CODE'] = str(GAME_CODE)
     run('build-ios-rust', ['cargo', f'+{TOOLCHAIN}', 'build', '--locked', '--release',
@@ -124,9 +144,9 @@ try:
     commands = output(['otool', '-l', str(executable)])
     if 'segname __GAME' not in commands:
         raise RuntimeError('The iOS executable does not contain embedded game code.')
-    (BUILD / 'logs/fork-r3-ios-executable-load-commands.txt').write_text(commands)
+    (BUILD / 'logs/fork-r4-ios-executable-load-commands.txt').write_text(commands)
     signature = subprocess.run(['codesign', '--display', str(app)], text=True, capture_output=True)
-    (BUILD / 'logs/fork-r3-ios-signature-status.txt').write_text(signature.stdout + signature.stderr)
+    (BUILD / 'logs/fork-r4-ios-signature-status.txt').write_text(signature.stdout + signature.stderr)
     if signature.returncode == 0 or 'LC_CODE_SIGNATURE' in commands:
         raise RuntimeError('The unsigned executable still contains a signature.')
     signature_folder = app / '_CodeSignature'
@@ -167,10 +187,11 @@ try:
               'precompiled_game_bytes': GAME_CODE.stat().st_size,
               'installed_application_logical_bytes': sum(p.stat().st_size for p in app.rglob('*') if p.is_file()),
               'signature_verification': 'Unsigned: no embedded Mach-O signature, resource seal or provisioning profile.',
-              'game_code_embedded': True, 'build_jobs': 2, 'ios_heap_ceiling_gib': 5,
+              'game_code_embedded': True, 'build_jobs': 2, 'ios_heap_ceiling_gib': 5, 'wasm_optimizer': optimizer_version,
+              'wasm_optimization': '-O3' if optimizer_version else None, 'optimized_wasm_sha256': optimized_sha256,
               'sideload_signing_required': True, 'actual_device_tested': False, 'gameplay_tested': False}
     (IPA.parent / 'SHA256SUMS.txt').write_text(digest.hexdigest() + '  ' + IPA.name + '\n')
-    (BUILD / 'logs/fork-r3-ipa-verification.json').write_text(json.dumps(report, indent=2) + '\n')
+    (BUILD / 'logs/fork-r4-ipa-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     state('complete', artifact=report)
     print(json.dumps(report), flush=True)
 except Exception as error:

@@ -104,6 +104,46 @@ impl Reencode for Patcher {
     }
 }
 
+// Upstream 388da687: patch before Binaryen so hooks/exports survive inlining.
+pub fn is_patched(wasm: &[u8]) -> bool {
+    Parser::new(0).parse_all(wasm).any(|p| match p {
+        Ok(Payload::ImportSection(s)) => s.into_imports().any(|i| i.is_ok_and(|i| i.name == HOOKS[0].0)),
+        _ => false,
+    })
+}
+
+// Compare external ABI, resolving function type indices after optimizer rewrites.
+// Full validator/precompiler still validates bodies and memory64/thread features.
+pub fn contract(wasm: &[u8]) -> Result<(Vec<String>, Vec<String>)> {
+    wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all()).validate_all(wasm)?;
+    let mut types = Vec::new(); let mut funcs = Vec::new();
+    let mut imports = Vec::new(); let mut exports = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload? {
+            Payload::TypeSection(s) => { for ty in s.into_iter_err_on_gc_types() { types.push(format!("{:?}", ty?)); } }
+            Payload::ImportSection(s) => { for imp in s.into_imports() {
+                let imp = imp?;
+                let ty = match imp.ty {
+                    TypeRef::Func(i) => { funcs.push(i); types[i as usize].clone() }
+                    other => format!("{other:?}"),
+                };
+                imports.push(format!("{}:{}:{ty}", imp.module, imp.name));
+            } }
+            Payload::FunctionSection(s) => { for ty in s { funcs.push(ty?); } }
+            Payload::ExportSection(s) => { for exp in s {
+                let exp = exp?;
+                let ty = match exp.kind {
+                    wasmparser::ExternalKind::Func => types[funcs[exp.index as usize] as usize].clone(),
+                    other => format!("{other:?}"),
+                };
+                exports.push(format!("{}:{ty}", exp.name));
+            } }
+            _ => {}
+        }
+    }
+    imports.sort(); exports.sort(); Ok((imports, exports))
+}
+
 pub fn patch(wasm: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<u8>> {
     let (mut imported_funcs, mut types, mut tls_global) = (0u32, 0u32, None);
     let mut by_name: HashMap<String, u32> = HashMap::new();
