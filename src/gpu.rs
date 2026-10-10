@@ -803,9 +803,11 @@ impl Gpu {
         let input_size = crate::input::size();
         let input_size = (input_size.0 as u32, input_size.1 as u32);
         let temporal = if std::env::var("MUGUET_METALFX_TEMPORAL").as_deref() == Ok("1") {
-            surface.as_ref().and_then(|(_, w)| {
-                let size = w.outer_size();
-                crate::temporal::Temporal::new(&device, &queue, input_size, (size.width.max(input_size.0), size.height.max(input_size.1)), FRAME_SLOTS)
+            surface.as_ref().and_then(|_| {
+                let ratio = std::env::var("MUGUET_METALFX_RATIO").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| [1.5, 2.0].contains(v)).unwrap_or(1.5);
+                let output = crate::temporal::output_size(input_size, ratio, device.limits().max_texture_dimension_2d)?;
+                log(&format!("MetalFX {ratio}x: selected render {}x{} -> reconstruction {}x{}", input_size.0, input_size.1, output.0, output.1));
+                crate::temporal::Temporal::new(&device, &queue, input_size, output, FRAME_SLOTS)
             })
         } else { None };
         if temporal.is_some() { log("MetalFX Temporal initialized (experimental image motion)"); }
@@ -3006,7 +3008,11 @@ impl Gpu {
                 None if std::env::var("MUGUET_METALFX_TEMPORAL").as_deref() == Ok("1") => "Unavailable",
                 None => "Off",
             };
-            let message = format!("{fps:.1} FPS · {frame_ms:.1} ms/frame\nMemory {} MB · heap {} MB\n{}×{} → {}×{} · MetalFX: {fx}\nDraws/frame {} · GPU validation errors {}\nController: {}", crate::footprint_mb(), crate::RT.get().map(|r| r.mem.data_size() >> 20).unwrap_or(0), render.0, render.1, self.surface_size.0, self.surface_size.1, (self.draws-self.hud_draws)/frames.max(1), self.errors.load(Ordering::Relaxed), if crate::pad::ACTIVE.load(Ordering::Relaxed) { "Connected" } else { "None" });
+            let memory = crate::footprint_mb();
+            let available = crate::available_memory_mb();
+            let heap = crate::RT.get().map(|r| r.mem.data_size() >> 20).unwrap_or(0);
+            let ratio = std::env::var("MUGUET_METALFX_RATIO").unwrap_or_else(|_| "1.5".into());
+            let message = format!("{fps:.1} FPS · {frame_ms:.1} ms/frame\nRAM used {memory} MiB · iOS headroom {available} MiB\niOS app budget ≈ {} MiB · linear heap {heap}/{} MiB\nRender {}×{} → output {}×{}\nMetalFX {ratio}×: {fx}\nDraws/frame {} · GPU validation errors {}\nController: {}", memory + available, crate::game_heap_limit_mb(), render.0, render.1, self.surface_size.0, self.surface_size.1, (self.draws-self.hud_draws)/frames.max(1), self.errors.load(Ordering::Relaxed), if crate::pad::ACTIVE.load(Ordering::Relaxed) { "Connected" } else { "None" });
             if let Ok(c) = std::ffi::CString::new(message) {
                 extern "C" { fn muguet_hud_update(text: *const std::ffi::c_char); }
                 unsafe { muguet_hud_update(c.as_ptr()); }

@@ -19,6 +19,7 @@ final class Settings: ObservableObject {
     @Published var controllerSensitivity = 1.5
     @Published var controllerDeadzone = 0.12
     @Published var temporal = false
+    @Published var temporalRatio = 1.5
     @Published var performanceHUD = false
     @Published var mute = false
     @Published var multiplayer = false
@@ -39,6 +40,7 @@ final class Settings: ObservableObject {
         if let v = json["controller_sensitivity"] as? Double, v.isFinite { controllerSensitivity = min(4, max(0.25, v)) }
         if let v = json["controller_deadzone"] as? Double, v.isFinite { controllerDeadzone = min(0.30, max(0.05, v)) }
         if let v = json["metalfx_temporal"] as? Bool { temporal = v && metalFXSupported }
+        if let v = json["metalfx_ratio"] as? Double, [1.5, 2.0].contains(v) { temporalRatio = v }
         if let v = json["performance_hud"] as? Bool { performanceHUD = v }
         if let v = json["mute"] as? Bool { mute = v }
         if let v = json["multiplayer"] as? Bool { multiplayer = v }
@@ -57,6 +59,7 @@ final class Settings: ObservableObject {
         json["controller_sensitivity"] = controllerSensitivity
         json["controller_deadzone"] = controllerDeadzone
         json["metalfx_temporal"] = temporal && metalFXSupported
+        json["metalfx_ratio"] = temporalRatio
         json["performance_hud"] = performanceHUD
         json["mute"] = mute
         json["multiplayer"] = multiplayer
@@ -135,7 +138,7 @@ struct LauncherView: View {
         HStack(spacing: 0) {
             VStack(spacing: 16) {
                 Text("Muguet").font(.largeTitle.weight(.bold))
-                Text("Fork r1").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("Fork r2").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !muguet_has_game_code() {
                     Text("This build has no game code: build it with ./make-ios.sh <game.zip>.")
                         .foregroundStyle(.red).font(.callout).multilineTextAlignment(.center)
@@ -179,10 +182,16 @@ struct LauncherView: View {
                     if !metalFXSupported {
                         Text("Temporal upscaling is unavailable on this device.").font(.caption).foregroundStyle(.secondary)
                     } else if s.temporal {
-                        Text("Sharper output at the selected render resolution. Experimental motion estimation can leave trails on moving objects.")
+                        Picker("MetalFX reconstruction", selection: $s.temporalRatio) {
+                            Text("1.5×").tag(1.5)
+                            Text("2×").tag(2.0)
+                        }.pickerStyle(.segmented)
+                        Text("Multiplies the selected render resolution without lowering it. 1.5× costs less; 2× produces a larger output. Motion estimation is experimental and can leave trails.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Toggle("Performance HUD", isOn: $s.performanceHUD)
+                    Text("The HUD shows RAM used, iOS memory headroom and the current linear heap / ceiling. A 3 GiB heap is not the app's memory limit. GPU resources also use the app's budget.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
                     Text("Touch sensitivity")

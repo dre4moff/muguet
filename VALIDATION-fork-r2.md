@@ -1,0 +1,13 @@
+# Fork r2 validation — 2026-10-10
+
+- Rust 1.98.1 / Wasmtime 49.0.2: host and aarch64-apple-ios release builds passed with two build jobs. Swift typechecking and compilation passed at the iOS 15 deployment target; MetalFX remains guarded for iOS 16 and weak linked.
+- Five Rust tests passed: 1.5× / 2× selected-input reconstruction dimensions, rejection of invalid ratios and texture sizes, existing controller filtering and wheel mappings, vertex-entry jitter rewriting, and real GPU shader/bind-group validation. All 1,113 game vertex programs passed validation after jitter injection.
+- Native Mac GPU tests passed for three translated frames at each ratio: 128×96 input produced 192×144 at 1.5× and 256×192 at 2×. Both outputs were non-black, GPU event synchronization completed, and previous-frame motion was −4 px. Source ZIP cleanup tests also passed for selected unchanged ZIP deletion and changed/non-ZIP protection.
+- Personal IPA: version 0.1.2, build 2, arm64, bundle identifier ch.cclerc.muguet.ios. ZIP CRC and packaged executable equivalence passed. Mach-O parsing verified no signature command and the exact embedded precompiled game-code digest; MetalFX is weak linked and the memory-headroom API is linked. No resource seal or provisioning profile is present. SHA-256 and measured size are recorded in the local report.
+- Heap policy remains 5 GiB. The HUD distinguishes process footprint, iOS remaining memory headroom, approximate process budget, and the game's actual linear heap / maximum. This does not force memory growth or grant signing entitlements.
+- Controller source is unchanged from r1, following the owner's confirmation that it works correctly. r2 does not claim a new USB/controller fix.
+- The original game-data ZIP, original IPA and preserved r1 IPA match their earlier SHA-256 digests. No game-data files were modified. All 547 retained application, vendor and dependency license files match the previous license set; Cargo.lock is unchanged.
+
+These checks establish host/GPU/build/package behavior. The new r2 IPA has not been installed or tested for gameplay, image quality, performance, device memory budget or ZIP deletion through an iPhone file provider. The previously reported working controller applies to the existing app, not a new r2 device test. MetalFX still uses experimental image-estimated motion rather than engine geometry motion vectors.
+
+The public release contains source under GPL-3.0-or-later and no game-bearing IPA, game Wasm, precompiled game code, game assets or repack links. The personal unsigned IPA is delivered locally for the owner to sign/install with iLoader. Signing and provisioning determine whether Increased Memory Limit is available; the actual allowance must be measured on the device.

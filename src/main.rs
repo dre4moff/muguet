@@ -61,6 +61,20 @@ pub fn footprint_mb() -> u64 {
     info[2 + 7] >> 20
 }
 
+#[cfg(target_os = "ios")]
+pub fn available_memory_mb() -> u64 {
+    extern "C" { fn os_proc_available_memory() -> usize; }
+    unsafe { (os_proc_available_memory() >> 20) as u64 }
+}
+
+#[cfg(target_os = "ios")]
+pub fn game_heap_limit_mb() -> u64 {
+    RT.get().map(|rt| {
+        let ty = rt.mem.ty();
+        ty.maximum().map(|pages| pages << ty.page_size_log2()).unwrap_or(IOS_HEAP_MAX) >> 20
+    }).unwrap_or(IOS_HEAP_MAX >> 20)
+}
+
 pub fn set_interactive_qos() {
     set_qos(QOS_CLASS_USER_INTERACTIVE);
 }

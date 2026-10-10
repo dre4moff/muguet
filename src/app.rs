@@ -96,6 +96,9 @@ impl ApplicationHandler for App {
                 std::process::exit(0);
             }
             WindowEvent::Resized(_) => {
+                // MetalFX changes the drawable, not the selected game back buffer.
+                // The iOS game keeps its startup resolution for this session.
+                if cfg!(target_os = "ios") && self.started { return; }
                 let (w, h) = backbuffer_size(&window);
                 input::set_size(w, h);
             }

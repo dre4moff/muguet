@@ -2,6 +2,14 @@
 use regex::Regex;
 use wgpu::*;
 
+// Reconstruct from the selected render size; never reduce the game resolution.
+pub fn output_size(input: (u32, u32), ratio: f64, limit: u32) -> Option<(u32, u32)> {
+    if ![1.5, 2.0].contains(&ratio) || input.0 == 0 || input.1 == 0 { return None; }
+    let scaled = (input.0 as f64 * ratio, input.1 as f64 * ratio);
+    if scaled.0 > limit as f64 || scaled.1 > limit as f64 { return None; }
+    Some((scaled.0.round() as u32, scaled.1.round() as u32))
+}
+
 pub fn jitter(frame: u64) -> [f32; 2] {
     fn halton(mut n: u64, base: u64) -> f32 {
         let (mut value, mut weight) = (0.0, 1.0);
@@ -153,6 +161,16 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn ratios_reconstruct_the_selected_input_without_display_scaling() {
+        assert_eq!(output_size((1280, 720), 1.5, 8192), Some((1920, 1080)));
+        assert_eq!(output_size((1280, 720), 2.0, 8192), Some((2560, 1440)));
+        assert_eq!(output_size((2560, 1440), 2.0, 8192), Some((5120, 2880)));
+        assert_eq!(output_size((1202, 676), 1.5, 8192), Some((1803, 1014)));
+        assert_eq!(output_size((2560, 1440), 2.0, 4096), None);
+        assert_eq!(output_size((0, 720), 1.5, 8192), None);
+        assert_eq!(output_size((1280, 720), f64::NAN, 8192), None);
+        assert_eq!(output_size((1280, 720), 3.0, 8192), None);
+    }
     #[test] fn entry_returns_are_jittered_without_changing_helpers() {
         let source = "struct Out { @builtin(position) position: vec4<f32>, }; fn helper()->f32 { return 1.0; } @vertex fn main(@builtin(vertex_index) i:u32)->Out { return Out(vec4<f32>(0.0,0.0,0.0,1.0)); }";
         let changed = inject_jitter(source).unwrap();
