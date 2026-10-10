@@ -21,7 +21,7 @@ const HOOKS: &[(&str, &str, &[Arg])] = &[
     ("muguet_timewarp", "CTimeWarper::SetTargetTimeWarp(TW_Dir)", &[Arg::Local1Replaced]),
 ];
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 fn returns(args: &[Arg]) -> bool {
     args.contains(&Arg::Local1Replaced)

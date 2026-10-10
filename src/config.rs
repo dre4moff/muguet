@@ -14,6 +14,10 @@ pub struct Startup {
 const DEFAULT_CONFIG: &str = r#"{
   "scale": 0.5,
   "mouse_sensitivity": 2.0,
+  "controller_sensitivity": 1.5,
+  "controller_deadzone": 0.12,
+  "metalfx_temporal": false,
+  "performance_hud": false,
   "fullscreen": true,
   "fps_limit": 60,
   "start_mode": 2,
@@ -113,7 +117,7 @@ fn locate() -> anyhow::Result<PathBuf> {
     Ok(build)
 }
 
-const SETTING_VARS: &[&str] = &["MUGUET_SCALE", "MUGUET_MOUSE_SENS", "MUGUET_TOUCH_SENS", "MUGUET_RES", "MUGUET_FULLSCREEN", "MUGUET_MUTE", "MUGUET_HOST", "MUGUET_SERVER", "MUGUET_NAME"];
+const SETTING_VARS: &[&str] = &["MUGUET_SCALE", "MUGUET_MOUSE_SENS", "MUGUET_TOUCH_SENS", "MUGUET_PAD_SENS", "MUGUET_PAD_DEADZONE", "MUGUET_METALFX_TEMPORAL", "MUGUET_PERFORMANCE_HUD", "MUGUET_RES", "MUGUET_FULLSCREEN", "MUGUET_MUTE", "MUGUET_HOST", "MUGUET_SERVER", "MUGUET_NAME"];
 
 #[cfg(target_os = "ios")]
 pub fn reload() -> Vec<String> {
@@ -137,6 +141,10 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     if let Some(v) = num("scale") { set_default("MUGUET_SCALE", v.to_string()); }
     if let Some(v) = num("mouse_sensitivity") { set_default("MUGUET_MOUSE_SENS", v.to_string()); }
     if let Some(v) = num("touch_sensitivity") { set_default("MUGUET_TOUCH_SENS", v.to_string()); }
+    if let Some(v) = num("controller_sensitivity").filter(|v| v.is_finite()) { set_default("MUGUET_PAD_SENS", v.clamp(0.25, 4.0).to_string()); }
+    if let Some(v) = num("controller_deadzone").filter(|v| v.is_finite()) { set_default("MUGUET_PAD_DEADZONE", v.clamp(0.05, 0.30).to_string()); }
+    if flag("metalfx_temporal") { set_default("MUGUET_METALFX_TEMPORAL", "1"); }
+    if flag("performance_hud") { set_default("MUGUET_PERFORMANCE_HUD", "1"); }
     if let Some(r) = cfg.get("resolution").and_then(|v| v.as_str()) { set_default("MUGUET_RES", r); }
     if flag("fullscreen") { set_default("MUGUET_FULLSCREEN", "1"); }
     if flag("mute") { set_default("MUGUET_MUTE", "1"); }

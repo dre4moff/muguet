@@ -63,6 +63,8 @@ pub fn size() -> (i32, i32) {
 }
 
 pub fn set_focus(focused: bool) {
+    crate::pad::FOCUSED.store(focused, Ordering::Relaxed);
+    if !focused { crate::pad::release_all(); }
     if let Some(f) = word(FOCUS) { f.store(focused as i32, Ordering::SeqCst); }
     if !focused { release_all(); }
 }
@@ -178,10 +180,19 @@ static SENS: LazyLock<f64> = LazyLock::new(|| std::env::var("MUGUET_MOUSE_SENS")
 static FRAC: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
 
 pub fn mouse_delta_f(dx: f64, dy: f64) {
+    pointer_delta_f(dx * *SENS, dy * *SENS, &FRAC);
+}
+
+pub fn controller_delta_f(dx: f64, dy: f64) {
+    static PAD_FRAC: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+    pointer_delta_f(dx, dy, &PAD_FRAC);
+}
+
+fn pointer_delta_f(dx: f64, dy: f64, fraction: &Mutex<(f64, f64)>) {
     let (ix, iy) = {
-        let mut f = FRAC.lock().unwrap();
-        f.0 += dx * *SENS;
-        f.1 += dy * *SENS;
+        let mut f = fraction.lock().unwrap();
+        f.0 += dx;
+        f.1 += dy;
         let (ix, iy) = (f.0.trunc(), f.1.trunc());
         f.0 -= ix;
         f.1 -= iy;

@@ -12,6 +12,8 @@ mod import;
 mod io;
 mod mp;
 mod pad;
+mod controller;
+mod temporal;
 #[cfg(feature = "jit")]
 mod patch;
 mod proto;

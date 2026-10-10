@@ -4,6 +4,8 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import Metal
+import MetalFX
 
 let configURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("config.json")
@@ -14,6 +16,10 @@ final class Settings: ObservableObject {
     @Published var fps = 60
     @Published var textures = 0
     @Published var touch = 1.0
+    @Published var controllerSensitivity = 1.5
+    @Published var controllerDeadzone = 0.12
+    @Published var temporal = false
+    @Published var performanceHUD = false
     @Published var mute = false
     @Published var multiplayer = false
     @Published var host = false
@@ -30,6 +36,10 @@ final class Settings: ObservableObject {
         if let v = json["fps_limit"] as? Int { fps = v == 30 ? 30 : 60 }
         if let v = json["texture_quality"] as? Int, (0...2).contains(v) { textures = v }
         if let v = json["touch_sensitivity"] as? Double { touch = v }
+        if let v = json["controller_sensitivity"] as? Double, v.isFinite { controllerSensitivity = min(4, max(0.25, v)) }
+        if let v = json["controller_deadzone"] as? Double, v.isFinite { controllerDeadzone = min(0.30, max(0.05, v)) }
+        if let v = json["metalfx_temporal"] as? Bool { temporal = v && metalFXSupported }
+        if let v = json["performance_hud"] as? Bool { performanceHUD = v }
         if let v = json["mute"] as? Bool { mute = v }
         if let v = json["multiplayer"] as? Bool { multiplayer = v }
         if let v = json["host"] as? Bool { host = v }
@@ -44,6 +54,10 @@ final class Settings: ObservableObject {
         json["fps_limit"] = fps
         json["texture_quality"] = textures
         json["touch_sensitivity"] = (touch * 100).rounded() / 100
+        json["controller_sensitivity"] = controllerSensitivity
+        json["controller_deadzone"] = controllerDeadzone
+        json["metalfx_temporal"] = temporal && metalFXSupported
+        json["performance_hud"] = performanceHUD
         json["mute"] = mute
         json["multiplayer"] = multiplayer
         json["host"] = host
@@ -53,6 +67,13 @@ final class Settings: ObservableObject {
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
     }
+}
+
+var metalFXSupported: Bool {
+    if #available(iOS 16.0, *), let device = MTLCreateSystemDefaultDevice() {
+        return MTLFXTemporalScalerDescriptor.supportsDevice(device)
+    }
+    return false
 }
 
 @_silgen_name("muguet_import")
@@ -69,22 +90,35 @@ final class Importer: ObservableObject {
     @Published var ready = muguet_game_ready()
     @Published var progress: Double?
     @Published var error: String?
+    @Published var cleanupNotice: String?
 
     func run(_ url: URL) {
         error = nil
+        cleanupNotice = nil
         progress = 0
         DispatchQueue.global(qos: .userInitiated).async {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let originalIdentity = try? SourceArchiveIdentity.read(url)
             let ok = url.path.withCString { muguet_import($0) { done, total in
                 let p = total > 0 ? Double(done) / Double(total) : 0
                 DispatchQueue.main.async { Importer.shared.progress = p }
             } }
             let message = ok ? nil : muguet_import_error().map { String(cString: $0) } ?? "unknown error"
+            var cleanupMessage: String?
+            if ok {
+                do {
+                    guard let identity = originalIdentity else { throw ArchiveCleanupError.identityUnavailable }
+                    try identity.removeUnchangedArchive(at: url)
+                } catch {
+                    cleanupMessage = "Game data imported. The source ZIP could not be deleted: \(error.localizedDescription) Remove it in Files to recover space."
+                }
+            }
             DispatchQueue.main.async {
                 self.progress = nil
                 self.ready = muguet_game_ready()
                 if let message { self.error = "Import failed: \(message)" }
+                self.cleanupNotice = cleanupMessage
             }
         }
     }
@@ -101,6 +135,7 @@ struct LauncherView: View {
         HStack(spacing: 0) {
             VStack(spacing: 16) {
                 Text("Muguet").font(.largeTitle.weight(.bold))
+                Text("Fork r1").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !muguet_has_game_code() {
                     Text("This build has no game code: build it with ./make-ios.sh <game.zip>.")
                         .foregroundStyle(.red).font(.callout).multilineTextAlignment(.center)
@@ -109,6 +144,9 @@ struct LauncherView: View {
                 } else {
                     if let error { Text(error).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
                     playButton
+                    if let notice = importer.cleanupNotice {
+                        Text(notice).font(.caption).foregroundStyle(.orange)
+                    }
                     Button("Import other game data…") { picking = true }.font(.caption)
                 }
                 Text("proudly made by c22dev").font(.caption).foregroundStyle(.secondary)
@@ -135,10 +173,35 @@ struct LauncherView: View {
                     Text("30 fps (cooler)").tag(30)
                     Text("60 fps").tag(60)
                 }
+                Section("Rendering") {
+                    Toggle("MetalFX Temporal (experimental)", isOn: $s.temporal)
+                        .disabled(!metalFXSupported)
+                    if !metalFXSupported {
+                        Text("Temporal upscaling is unavailable on this device.").font(.caption).foregroundStyle(.secondary)
+                    } else if s.temporal {
+                        Text("Sharper output at the selected render resolution. Experimental motion estimation can leave trails on moving objects.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Toggle("Performance HUD", isOn: $s.performanceHUD)
+                }
                 HStack {
-                    Text("Look sensitivity")
+                    Text("Touch sensitivity")
                     Slider(value: $s.touch, in: 0.25...3, step: 0.25)
                     Text(String(format: "%.2f×", s.touch)).monospacedDigit().frame(width: 50, alignment: .trailing)
+                }
+                Section("Physical controller") {
+                    HStack {
+                        Text("Look sensitivity")
+                        Slider(value: $s.controllerSensitivity, in: 0.25...4, step: 0.25)
+                        Text(String(format: "%.2f×", s.controllerSensitivity)).monospacedDigit().frame(width: 50, alignment: .trailing)
+                    }
+                    HStack {
+                        Text("Stick dead zone")
+                        Slider(value: $s.controllerDeadzone, in: 0.05...0.30, step: 0.01)
+                        Text(String(format: "%.0f %%", s.controllerDeadzone * 100)).monospacedDigit().frame(width: 50, alignment: .trailing)
+                    }
+                    Text("Hold D-pad Left in a vehicle for the radio wheel. Hold D-pad Down for the character wheel; use the right stick to select.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle("Mute audio", isOn: $s.mute)
                 Section("Multiplayer") {
@@ -179,6 +242,8 @@ struct LauncherView: View {
                 Button("Import game data .zip") { picking = true }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
+                Text("The selected ZIP is deleted after a successful import to recover storage.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if let e = importer.error { Text(e).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
         }

@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static FOCUSED: AtomicBool = AtomicBool::new(true);
 
 pub static IN_VEHICLE: AtomicBool = AtomicBool::new(false);
 
@@ -26,9 +28,7 @@ struct State {
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
 const STICK_DEADZONE: f32 = 0.3;
-const LOOK_DEADZONE: f32 = 0.12;
-
-const LOOK_SPEED: f64 = 700.0;
+const LOOK_SPEED: f64 = 1400.0;
 
 fn gamepad() -> Option<objc2::rc::Retained<GCExtendedGamepad>> {
     unsafe { GCController::controllers().iter().find_map(|c| c.extendedGamepad()) }
@@ -39,9 +39,10 @@ fn down(b: &GCControllerButtonInput) -> bool {
 }
 
 pub fn poll() -> bool {
+    if !FOCUSED.load(Ordering::Relaxed) { release_all(); return false; }
     let Some(gp) = gamepad() else {
         if ACTIVE.swap(false, Ordering::Relaxed) {
-            if let Some(st) = STATE.lock().unwrap().take() { release(st); }
+            release_all();
             eprintln!("[pad] controller disconnected");
         }
         return false;
@@ -55,6 +56,10 @@ pub fn poll() -> bool {
     st.last = Instant::now();
 
     let in_car = IN_VEHICLE.load(Ordering::Relaxed);
+    let paused = MENU_ACTIVE.load(Ordering::Relaxed);
+    let gain = std::env::var("MUGUET_PAD_SENS").ok().and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(1.5).clamp(0.25, 4.0);
+    let deadzone = std::env::var("MUGUET_PAD_DEADZONE").ok().and_then(|s| s.parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(0.12).clamp(0.05, 0.30);
+    HORN_PAD.store(false, Ordering::Relaxed);
     let mut keys: HashSet<&'static str> = HashSet::new();
     let mut buttons = 0u8;
     unsafe {
@@ -62,7 +67,13 @@ pub fn poll() -> bool {
         let (lx, ly) = (ls.xAxis().value(), ls.yAxis().value());
         if lx < -STICK_DEADZONE { keys.insert("KeyA"); }
         if lx > STICK_DEADZONE { keys.insert("KeyD"); }
-        if in_car {
+        if paused {
+            keys.clear();
+            if lx < -STICK_DEADZONE { keys.insert("ArrowLeft"); }
+            if lx > STICK_DEADZONE { keys.insert("ArrowRight"); }
+            if ly > STICK_DEADZONE { keys.insert("ArrowUp"); }
+            if ly < -STICK_DEADZONE { keys.insert("ArrowDown"); }
+        } else if in_car {
             if ly > STICK_DEADZONE { keys.insert("Numpad8"); }
             if ly < -STICK_DEADZONE { keys.insert("Numpad2"); }
             if gp.rightTrigger().value() > 0.2 { keys.insert("KeyW"); }
@@ -80,27 +91,27 @@ pub fn poll() -> bool {
             if down(&gp.rightShoulder()) { keys.insert("KeyQ"); }
             if gp.leftThumbstickButton().is_some_and(|b| down(&b)) { keys.insert("ControlLeft"); }
         }
+        // The phone and mission prompts also consume Enter/Backspace. Keep those
+        // navigation keys, but never emit sprint/reload while the pause menu is active.
         if down(&gp.buttonA()) { keys.insert("Enter"); }
-        if down(&gp.buttonB()) { keys.insert("KeyR"); keys.insert("Backspace"); }
-        if down(&gp.buttonY()) { keys.insert("KeyF"); }
-        if down(&gp.leftShoulder()) { keys.insert("Tab"); }
-        if gp.rightThumbstickButton().is_some_and(|b| down(&b)) { keys.insert("KeyC"); }
+        if down(&gp.buttonB()) {
+            keys.insert("Backspace");
+            if !paused { keys.insert("KeyR"); }
+        }
+        if !paused {
+            if down(&gp.buttonY()) { keys.insert("KeyF"); }
+            if down(&gp.leftShoulder()) { keys.insert("Tab"); }
+            if gp.rightThumbstickButton().is_some_and(|b| down(&b)) { keys.insert("KeyC"); }
+        }
         let dp = gp.dpad();
-        if down(&dp.up()) { keys.insert("ArrowUp"); }
-        if down(&dp.down()) { keys.insert("ArrowDown"); }
-        if down(&dp.left()) { keys.insert("ArrowLeft"); }
-        if down(&dp.right()) { keys.insert("ArrowRight"); }
+        keys.extend(crate::controller::dpad_keys(paused, in_car, down(&dp.up()), down(&dp.down()), down(&dp.left()), down(&dp.right())));
         if down(&gp.buttonMenu()) { keys.insert("Escape"); }
         if gp.buttonOptions().is_some_and(|b| down(&b)) { keys.insert("KeyV"); }
 
         let rs = gp.rightThumbstick();
-        let curve = |v: f32| -> f64 {
-            let a = v.abs();
-            if a < LOOK_DEADZONE { 0.0 } else { (((a - LOOK_DEADZONE) / (1.0 - LOOK_DEADZONE)) as f64).powf(1.8).copysign(v as f64) }
-        };
-        let (dx, dy) = (curve(rs.xAxis().value()), -curve(rs.yAxis().value()));
-        if dx != 0.0 || dy != 0.0 {
-            input::mouse_delta_f(dx * LOOK_SPEED * dt, dy * LOOK_SPEED * dt);
+        let (dx, dy) = crate::controller::look(rs.xAxis().value(), rs.yAxis().value(), deadzone);
+        if !paused && (dx != 0.0 || dy != 0.0) {
+            input::controller_delta_f(dx * LOOK_SPEED * gain * dt, dy * LOOK_SPEED * gain * dt);
         }
     }
 
@@ -123,4 +134,9 @@ fn release(st: State) {
     for k in st.held { input::key(k, false, false, None, false); }
     if st.buttons & 1 != 0 { input::button(0, false); }
     if st.buttons & 2 != 0 { input::button(2, false); }
+}
+
+pub fn release_all() {
+    HORN_PAD.store(false, Ordering::Relaxed);
+    if let Some(st) = STATE.lock().unwrap().take() { release(st); }
 }

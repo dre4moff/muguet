@@ -12,6 +12,7 @@ use wasmtime::{Caller, Val};
 
 #[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("IsPauseMenuActive", "hud_commands::CommandIsPauseMenuActive()"),
     ("PlayerPedId", "player_commands::CommandPlayerPedId()"),
     ("GetEntityCoords", "entity_commands::CommandGetEntityCoords(int, bool)"),
     ("GetEntityHeading", "entity_commands::CommandGetEntityHeading(int)"),
@@ -879,6 +880,7 @@ pub fn script_tick(caller: &mut Caller<'_, HostState>, thread: u64, tls: u64) ->
         }
 
         if crate::pad::ACTIVE.load(Ordering::Relaxed) || cfg!(target_os = "ios") {
+            crate::pad::MENU_ACTIVE.store(c.i("IsPauseMenuActive", &[]) != 0, Ordering::Relaxed);
             let ped = c.i("PlayerPedId", &[]);
             let in_car = ped != 0 && c.exists(ped) && c.i("IsPedInAnyVehicle", &[i(ped), b(false)]) != 0;
             crate::pad::IN_VEHICLE.store(in_car, Ordering::Relaxed);

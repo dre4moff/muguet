@@ -159,7 +159,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         #[allow(unused_mut)]
-        let mut wait = if crate::pad::poll() { 8 } else if cfg!(target_os = "ios") { 250 } else { 1000 };
+        let mut wait = if self.started && crate::pad::poll() { 8 } else if cfg!(target_os = "ios") { 250 } else { 1000 };
         #[cfg(target_os = "ios")]
         if crate::touch::refresh() { wait = 15; }
         #[cfg(target_os = "ios")]
@@ -182,6 +182,16 @@ impl App {
         let Some(window) = self.window.clone() else { return };
         if self.started { return; }
         self.started = true;
+        #[cfg(target_os = "ios")]
+        if std::env::var("MUGUET_PERFORMANCE_HUD").as_deref() == Ok("1") {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(RawWindowHandle::UiKit(h)) = window.window_handle().map(|h| h.as_raw()) {
+                if let Some(vc) = h.ui_view_controller {
+                    extern "C" { fn muguet_hud_install(vc: *mut std::ffi::c_void); }
+                    unsafe { muguet_hud_install(vc.as_ptr()); }
+                }
+            }
+        }
         let (w, h) = backbuffer_size(&window);
         input::set_size(w, h);
         let rt = match self.rt.clone() {
