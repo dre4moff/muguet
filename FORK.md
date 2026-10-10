@@ -1,10 +1,12 @@
-# Muguet fork r4 (0.1.4)
+# Muguet fork r5 (0.1.5)
 
 This fork starts from c22dev/Muguet commit `63737647eb3f7fee2e2139995606e3b02a5920ee`. The original author, copyright notices, GPL-3.0-or-later license, and vendored MIT/Apache licenses are retained. This is an independent modification by dre4moff, not an official Rockstar or upstream release.
 
 ## Performance investigation
 
-r4 adopts upstream's Binaryen `wasm-opt -O3` preprocessing before iOS native compilation (patching hooks/exports first). It also removes a per-draw uniform allocation and redundant full-block copy while preserving zero padding and all rendering inputs. Its opt-in HUD adds native renderer/process CPU time, command-ring waits, existing GPU fence waits, drawable acquisition, submission/uniform costs, readback/group counts, I/O service cost and bounded asynchronous GPU pass timestamps. See [PERFORMANCE.md](PERFORMANCE.md) for exact definitions and limitations. No iPhone FPS gain is claimed by host checks. Controller and 5 GiB heap policy remain unchanged.
+r5 targets the CPU limit captured in the owner's new HUD screenshots: 26.5–27.5 native renderer CPU ms per 27–28 ms frame, about 98% of one core. It removes repeated shader-description copies/string cache keys and reuses empty command tracking tables after their original resource lifetime ends. Distinct resources remain owned and validated. The HUD separates deferred Metal encoding from queue submission, shows pass/submit/pending-draw counts, and makes GPU timestamp profiling a separate off-by-default diagnostic option. Pixel/lifetime and destroyed-resource checks validate host correctness; no 60 FPS or measured iPhone gain is claimed. See PERFORMANCE.md and VALIDATION-fork-r5.md.
+
+r4 adopts upstream's Binaryen `wasm-opt -O3` preprocessing before iOS native compilation (patching hooks/exports first). It also removes a per-draw uniform allocation and redundant full-block copy while preserving zero padding and all rendering inputs. Its original opt-in HUD added native renderer/process CPU time, command-ring waits, existing GPU fence waits, drawable acquisition, submission/uniform costs, readback/group counts, I/O service cost and bounded asynchronous GPU pass timestamps. See [PERFORMANCE.md](PERFORMANCE.md) for exact definitions and limitations. No iPhone FPS gain is claimed by host checks. Controller and 5 GiB heap policy remain unchanged.
 
 ## Original rendering restored
 
@@ -45,7 +47,7 @@ RUSTUP_HOME="$PWD/.build/rustup-home" CARGO_HOME="$PWD/.build/cargo-home" \
 python3 tools/build-unsigned.py /path/to/your/game.wasm --xcodegen /path/to/xcodegen --wasm-opt /path/to/wasm-opt
 ```
 
-Output: `.build/artifacts/fork-r4/Muguet-0.1.4-fork-r4-ios-arm64-unsigned.ipa` and SHA-256 evidence. The IPA is genuinely unsigned: signing and device installation are performed by the owner. Keep the upstream bundle identifier to preserve an existing installation's data (subject to your signing/install tool's behavior). The app retains the 5 GiB iOS heap ceiling and does not enable JIT. A current 3072 MiB heap means a 3 GiB linear-memory address range, not a 3 GiB process cap or necessarily 3 GiB of resident RAM. The ceiling does not force the game to allocate or use that much memory. Import the same compatible game-data ZIP; these changes do not require editing game-data files. One new pause-state export is added to the code embedded in the personal IPA.
+Output: `.build/artifacts/fork-r5/Muguet-0.1.5-fork-r5-ios-arm64-unsigned.ipa` and SHA-256 evidence. The IPA is genuinely unsigned: signing and device installation are performed by the owner. Keep the upstream bundle identifier to preserve an existing installation's data (subject to your signing/install tool's behavior). The app retains the 5 GiB iOS heap ceiling and does not enable JIT. A current 3072 MiB heap means a 3 GiB linear-memory address range, not a 3 GiB process cap or necessarily 3 GiB of resident RAM. The ceiling does not force the game to allocate or use that much memory. Import the same compatible game-data ZIP; these changes do not require editing game-data files. One new pause-state export is added to the code embedded in the personal IPA.
 
 ## iOS RAM and signing
 

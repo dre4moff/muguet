@@ -21,7 +21,7 @@ use crate::{
     command::{
         extract_texture_selector, validate_linear_texture_data, validate_texture_buffer_copy,
         validate_texture_copy_dst_format, validate_texture_copy_range, ClearError,
-        CommandAllocator, CommandBuffer, CommandEncoder, CommandEncoderError, CopySide,
+        CommandAllocator, PooledTracker, CommandBuffer, CommandEncoder, CommandEncoderError, CopySide,
         TransferError,
     },
     device::{DeviceError, WaitIdleError},
@@ -42,7 +42,7 @@ use crate::{
     resource_log,
     scratch::ScratchBuffer,
     snatch::{SnatchGuard, Snatchable},
-    track::{self, Tracker, TrackerIndex},
+    track::{self, TrackerIndex},
     FastHashMap, SubmissionIndex,
 };
 use crate::{device::resource::CommandIndices, resource::RawResourceAccess};
@@ -342,7 +342,7 @@ pub enum TempResource {
 /// [`wgpu_hal::CommandEncoder`]: hal::CommandEncoder
 pub(crate) struct EncoderInFlight {
     inner: crate::command::InnerCommandEncoder,
-    pub(crate) trackers: Tracker,
+    pub(crate) trackers: PooledTracker,
     pub(crate) temp_resources: Vec<TempResource>,
     /// We only need to keep these resources alive.
     _indirect_draw_validation_resources: crate::indirect_validation::DrawResources,
@@ -474,7 +474,7 @@ impl PendingWrites {
                     api: crate::command::EncodingApi::InternalUse,
                     label: "(wgpu internal) PendingWrites command encoder".into(),
                 },
-                trackers: Tracker::new(device.ordered_buffer_usages, device.ordered_texture_usages),
+                trackers: command_allocator.acquire_tracker(device),
                 temp_resources: mem::take(&mut self.temp_resources),
                 _indirect_draw_validation_resources: crate::indirect_validation::DrawResources::new(
                     device.clone(),

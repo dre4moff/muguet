@@ -14,6 +14,7 @@ pub(crate) struct BlasTracker {
 }
 
 impl BlasTracker {
+    pub fn clear(&mut self) { self.metadata.clear(); }
     pub fn new() -> Self {
         Self {
             metadata: ResourceMetadata::new(),

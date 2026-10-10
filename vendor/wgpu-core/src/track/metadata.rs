@@ -201,14 +201,31 @@ fn iterate_bitvec_indices(ownership: &BitVec<usize>) -> impl Iterator<Item = usi
         .enumerate()
         .filter(|&(_, word)| word != 0)
         .flat_map(move |(word_index, mut word)| {
-            let bit_start = word_index * BITS_PER_BLOCK;
-            let bit_end = (bit_start + BITS_PER_BLOCK).min(size);
-
-            (bit_start..bit_end).filter(move |_| {
-                let active = word & 0b1 != 0;
-                word >>= 1;
-
-                active
+            // Enumerate occupied bits directly rather than checking all 64
+            // positions of every nonempty word in sparse command trackers.
+            core::iter::from_fn(move || {
+                if word == 0 { return None; }
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let index = word_index * BITS_PER_BLOCK + bit;
+                // A truncated bitvec can retain set padding bits in its last
+                // word. Valid indices precede padding, so stop at the first.
+                (index < size).then_some(index)
             })
         })
+}
+
+#[cfg(test)] mod tests {
+    use super::*;
+    #[test] fn sparse_iteration_matches_membership_after_growth_and_truncation() {
+        for len in [0, 1, 63, 64, 65, 127, 1000, 65536] {
+            for seed in 0..16usize {
+                let bits = BitVec::<usize>::from_fn_general(len, |i| (i*173+seed)%17==0);
+                let expected: Vec<_> = (0..len).filter(|&i| bits.get(i)==Some(true)).collect();
+                assert_eq!(iterate_bitvec_indices(&bits).collect::<Vec<_>>(), expected);
+            }
+            let mut bits=BitVec::<usize>::from_elem_general(len+129,true); bits.truncate(len);
+            assert_eq!(iterate_bitvec_indices(&bits).collect::<Vec<_>>(), (0..len).collect::<Vec<_>>());
+        }
+    }
 }

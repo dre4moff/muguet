@@ -653,6 +653,14 @@ pub(crate) struct Tracker {
 }
 
 impl Tracker {
+    /// Forget all resource ownership/state only after the command buffer's
+    /// existing lifecycle permits release. Keep empty arrays for reuse.
+    pub fn clear(&mut self) {
+        self.buffers.clear(); self.textures.clear(); self.blas_s.clear();
+        self.tlas_s.clear(); self.views.clear(); self.bind_groups.clear();
+        self.compute_pipelines.clear(); self.render_pipelines.clear();
+        self.bundles.clear(); self.query_sets.clear();
+    }
     pub fn new(
         ordered_buffer_usages: wgt::BufferUses,
         ordered_texture_usages: wgt::TextureUses,

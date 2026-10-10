@@ -17,6 +17,7 @@ final class Settings: ObservableObject {
     @Published var controllerSensitivity = 1.5
     @Published var controllerDeadzone = 0.12
     @Published var performanceHUD = false
+    @Published var gpuProfiling = false
     @Published var mute = false
     @Published var multiplayer = false
     @Published var host = false
@@ -39,6 +40,7 @@ final class Settings: ObservableObject {
         if let v = json["controller_sensitivity"] as? Double, v.isFinite { controllerSensitivity = min(4, max(0.25, v)) }
         if let v = json["controller_deadzone"] as? Double, v.isFinite { controllerDeadzone = min(0.30, max(0.05, v)) }
         if let v = json["performance_hud"] as? Bool { performanceHUD = v }
+        if let v = json["gpu_profiling"] as? Bool { gpuProfiling = v }
         if let v = json["mute"] as? Bool { mute = v }
         if let v = json["multiplayer"] as? Bool { multiplayer = v }
         if let v = json["host"] as? Bool { host = v }
@@ -56,6 +58,7 @@ final class Settings: ObservableObject {
         json["controller_sensitivity"] = controllerSensitivity
         json["controller_deadzone"] = controllerDeadzone
         json["performance_hud"] = performanceHUD
+        json["gpu_profiling"] = gpuProfiling
         json["mute"] = mute
         json["multiplayer"] = multiplayer
         json["host"] = host
@@ -126,7 +129,7 @@ struct LauncherView: View {
         HStack(spacing: 0) {
             VStack(spacing: 16) {
                 Text("Muguet").font(.largeTitle.weight(.bold))
-                Text("Fork r4").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("Fork r5").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !muguet_has_game_code() {
                     Text("This build has no game code: build it with ./make-ios.sh <game.zip>.")
                         .foregroundStyle(.red).font(.callout).multilineTextAlignment(.center)
@@ -166,6 +169,10 @@ struct LauncherView: View {
                 }
                 Section("Rendering") {
                     Toggle("Performance HUD", isOn: $s.performanceHUD)
+                    if s.performanceHUD {
+                        Toggle("GPU timing (diagnostic)", isOn: $s.gpuProfiling)
+                        Text("GPU timing adds profiling work. Leave it off for normal play and performance comparisons.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Text("The HUD shows RAM used, iOS memory headroom and the current linear heap / ceiling. A 3 GiB heap is not the app's memory limit. GPU resources also use the app's budget.")
                         .font(.caption).foregroundStyle(.secondary)
                 }

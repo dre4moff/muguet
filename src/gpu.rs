@@ -216,7 +216,7 @@ fn wf(w: u32) -> f32 { f32::from_bits(w) }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind { Uniform, Storage, ReadOnlyStorage, Sampler, SamplerCmp, Texture, StorageTexture }
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 enum Sample { Float, Uint, Sint, Depth, Unfilterable }
 
 #[derive(Clone, Debug)]
@@ -494,6 +494,11 @@ struct Program {
 struct El { sem: u32, idx: u32, fmt: u32, slot: u32, offset: u32, cls: u32 }
 struct LayoutObj { els: Vec<El>, slots: Vec<(u32, u32)> }
 struct StateObj { words: Vec<u32>, sampler: Option<Sampler> }
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ViewKey {
+    Srv(TextureViewDimension, bool),
+    Uav(TextureViewDimension, TextureFormat),
+}
 struct ViewObj {
     res: u32,
     is_buf: bool,
@@ -503,7 +508,7 @@ struct ViewObj {
     b: u32,
     c: u32,
     d: u32,
-    views: HashMap<String, TextureView>,
+    views: HashMap<ViewKey, TextureView>,
 }
 struct QueryObj { qtype: u32, addr: u64, slots: Vec<u32> }
 
@@ -563,7 +568,9 @@ impl State {
 
 #[derive(Clone)]
 struct PassInfo {
-    rt_formats: Vec<Option<TextureFormat>>,
+    rt_formats: Rc<[Option<TextureFormat>]>,
+    rt_keys: Rc<[i64]>,
+    ds_key: i64,
     samples: u32,
     ds_format: Option<TextureFormat>,
     ro_depth: bool,
@@ -662,7 +669,7 @@ pub struct Gpu {
     hud_time: Instant,
     hud_frames: u64,
     visible_frames: u64,
-    hud_draws: u64,
+    hud_draws: u64, hud_passes: u64, hud_submits: u64, hud_pending: u64,
     objs: Vec<Option<Obj>>,
     enc: Option<CommandEncoder>,
     enc_epoch: u64,
@@ -691,7 +698,7 @@ pub struct Gpu {
     ubo_slot: usize,
     ubo_chunk: usize,
     ubo_off: u64,
-    dummy_tex: HashMap<String, TextureView>,
+    dummy_tex: HashMap<(TextureViewDimension, Sample, bool), TextureView>,
     dummy_smp: Option<Sampler>,
     dummy_cmp: Option<Sampler>,
     dummy_bufs: HashMap<u32, Buffer>,
@@ -758,7 +765,8 @@ impl Gpu {
 
             | Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         let profiling = perf::enabled();
-        let features = (want | if profiling { Features::TIMESTAMP_QUERY } else { Features::empty() }) & adapter.features();
+        let gpu_profiling = profiling && perf::gpu_enabled();
+        let features = (want | if gpu_profiling { Features::TIMESTAMP_QUERY } else { Features::empty() }) & adapter.features();
         let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
             label: Some("muguet"),
             required_features: features,
@@ -815,10 +823,10 @@ impl Gpu {
             }
             Some(job_tx)
         };
-        let gpu_timing = if profiling { GpuTiming::new(&device) } else { None };
+        let gpu_timing = if gpu_profiling { GpuTiming::new(&device) } else { None };
         Ok(Gpu {
             monitor: Monitor::new(profiling), gpu_timing,
-            hud_time: Instant::now(), hud_frames: 0, visible_frames: 0, hud_draws: 0,
+            hud_time: Instant::now(), hud_frames: 0, visible_frames: 0, hud_draws: 0, hud_passes: 0, hud_submits: 0, hud_pending: 0,
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
             objs: Vec::new(), enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
@@ -944,7 +952,10 @@ impl Gpu {
         let resolves = if self.pending_resolve.is_empty() { None } else { self.record_resolves() };
         if let Some(enc) = self.enc.take() {
             let started = self.monitor.start();
-            let idx = self.queue.submit([enc.finish()]);
+            let commands = enc.finish();
+            perf::add(&self.monitor.costs.encode, started);
+            let started = self.monitor.start();
+            let idx = self.queue.submit([commands]);
             perf::add(&self.monitor.costs.submit, started);
             if let Some(t) = &self.gpu_timing { t.arm_maps(); }
             self.last_submit = Some(idx);
@@ -1605,7 +1616,9 @@ impl Gpu {
         self.pass_key = Some(key);
         self.pdirty = true;
         self.pass_info = Some(PassInfo {
-            rt_formats: colors.iter().map(|c| c.as_ref().map(|x| x.1)).collect(),
+            rt_formats: colors.iter().map(|c| c.as_ref().map(|x| x.1)).collect::<Vec<_>>().into(),
+            rt_keys: colors.iter().map(|c| c.as_ref().map(|x| format_id(x.1)).unwrap_or(-1)).collect::<Vec<_>>().into(),
+            ds_key: ds_format.map(format_id).unwrap_or(-1),
             samples, ds_format, ro_depth: ds_att.is_some() && ro_d, ro_stencil: ds_att.is_some() && ro_s, width: pw, height: ph,
         });
         self.pass_st = PassSt::default();
@@ -1777,7 +1790,7 @@ impl Gpu {
         } else {
             (self.tex(res)?.tex.clone(), tformat)
         };
-        let key = format!("{:?}{}", b.dim, if proxied { ":p" } else { "" });
+        let key = ViewKey::Srv(b.dim, proxied);
         if let Some(v) = self.view_obj(srv_id).and_then(|v| v.views.get(&key)) { return Some(v.clone()); }
         let total = desc.mips;
         let mip_count = if bb == 0xffff_ffff || bb == 0 { total.saturating_sub(a) } else { bb };
@@ -1877,7 +1890,7 @@ impl Gpu {
     }
 
     fn dummy_texture(&mut self, b: &Binding) -> TextureView {
-        let key = format!("{:?}|{:?}|{}", b.dim, b.sample, b.ms);
+        let key = (b.dim, b.sample, b.ms);
         if let Some(v) = self.dummy_tex.get(&key) { return v.clone(); }
         let format = match b.sample { Sample::Uint => TextureFormat::Rgba8Uint, Sample::Sint => TextureFormat::Rgba8Sint, Sample::Depth => TextureFormat::Depth32Float, _ => TextureFormat::Rgba8Unorm };
         let cube = matches!(b.dim, TextureViewDimension::Cube | TextureViewDimension::CubeArray);
@@ -1911,11 +1924,12 @@ impl Gpu {
 
     fn stage_bind_group(&mut self, stage: usize, prog: &Program, group: u32, bgl: &(BindGroupLayout, u64)) -> Option<BgResult> {
         enum Res { Buf(Buffer, u64, Option<u64>), View(TextureView), Smp(Sampler) }
-        let bindings = prog.group_bindings.get(&group).cloned().unwrap_or_default();
-        let mut entries: Vec<(u32, Res)> = Vec::new();
-        let mut key: Vec<u64> = vec![bgl.1, prog.uid, stage as u64];
+        let bindings = prog.group_bindings.get(&group).map(Vec::as_slice).unwrap_or(&[]);
+        let mut entries: Vec<(u32, Res)> = Vec::with_capacity(bindings.len());
+        let mut key: Vec<u64> = Vec::with_capacity(3 + bindings.len() * 2);
+        key.extend([bgl.1, prog.uid, stage as u64]);
         let mut dyn_off = None;
-        for b in &bindings {
+        for b in bindings {
             match b.kind {
                 Kind::Uniform => {
                     if b.binding == 15 {
@@ -2001,7 +2015,7 @@ impl Gpu {
                     } };
                     if self.pending_clears.contains_key(&res) { self.materialize_clears(res); }
                     let (tex, tformat, layers) = { let t = self.tex(res)?; (t.tex.clone(), t.format, t.desc.d) };
-                    let k2 = format!("{:?}:{:?}", b.dim, tformat);
+                    let k2 = ViewKey::Uav(b.dim, tformat);
                     let v = match self.view_obj(uid).and_then(|v| v.views.get(&k2).cloned()) {
                         Some(v) => v,
                         None => {
@@ -2050,11 +2064,11 @@ impl Gpu {
         let (topo, strip) = topology(self.s.topo);
         let strip_fmt = if strip && self.s.ib.0 != 0 { Some(if self.s.ib.1 == 57 { IndexFormat::Uint16 } else { IndexFormat::Uint32 }) } else { None };
         let mut key: Vec<i64> = vec![vs.uid as i64, ps.map(|p| p.uid as i64).unwrap_or(0), self.s.layout as i64];
-        let strides: Vec<u32> = (0..16).map(|i| { let v = &self.s.vb[i]; if v.buf != 0 && self.buf(v.buf).map(|b| b.gpu.is_some()).unwrap_or(false) { v.stride } else { 0 } }).collect();
+        let strides: [u32; 16] = std::array::from_fn(|i| { let v = &self.s.vb[i]; if v.buf != 0 && self.buf(v.buf).map(|b| b.gpu.is_some()).unwrap_or(false) { v.stride } else { 0 } });
         for &(slot, _) in &layout.slots { key.push(strides[slot as usize] as i64); }
         key.extend([self.s.topo as i64, match strip_fmt { Some(IndexFormat::Uint16) => 1, Some(_) => 2, None => 0 }, self.s.blend.0 as i64, self.s.dss.0 as i64, self.s.rs as i64]);
-        for f in &pi.rt_formats { key.push(f.map(|f| format_id(f)).unwrap_or(-1)); }
-        key.extend([-7, pi.ds_format.map(format_id).unwrap_or(-1), pi.samples as i64, pi.ro_depth as i64, pi.ro_stencil as i64]);
+        key.extend(pi.rt_keys.iter().copied());
+        key.extend([-7, pi.ds_key, pi.samples as i64, pi.ro_depth as i64, pi.ro_stencil as i64]);
         let _ = (vs_id, ps_id);
         match self.pipelines.get(&key) {
             Some(PipeEntry::Done(p)) => return p.clone(),
@@ -2222,7 +2236,7 @@ impl Gpu {
         let v_first = if indexed || fold_v { 0 } else { start };
         let i_first = if fold_i { 0 } else { start_instance };
 
-        let mut vb_binds: Vec<(u32, Buffer, u64, u64)> = Vec::new();
+        let mut vb_binds: Vec<(u32, Buffer, u64, u64)> = Vec::with_capacity(layout.slots.len());
         for &(slot, cls) in &layout.slots {
             let vb = self.s.vb[slot as usize].clone();
             match self.buf(vb.buf).and_then(|b| b.gpu.clone().map(|g| (g, b.bytes))) {
@@ -2347,7 +2361,7 @@ impl Gpu {
         self.end_pass();
 
         let mut subs = Vec::new();
-        for b in prog.group_bindings.get(&0).cloned().unwrap_or_default() {
+        for b in prog.group_bindings.get(&0).map(Vec::as_slice).unwrap_or(&[]) {
             if b.kind != Kind::StorageTexture { continue; }
             let uid = *self.s.uav[2].get((b.binding as usize).wrapping_sub(160)).unwrap_or(&0);
             let tf = self.view_obj(uid).filter(|v| !v.is_buf).and_then(|v| self.tex(v.res)).map(|t| t.format);
@@ -3014,21 +3028,22 @@ impl Gpu {
             let available = crate::available_memory_mb();
             let heap = crate::RT.get().map(|r| r.mem.data_size() >> 20).unwrap_or(0);
             let profile = self.monitor.report(frames, elapsed);
-            let gpu = self.gpu_timing.as_ref().map(|t| t.report()).unwrap_or_else(|| "GPU timestamps: unsupported".into());
+            let gpu = self.gpu_timing.as_ref().map(|t| t.report()).unwrap_or_else(|| if perf::gpu_enabled() { "GPU timestamps: unsupported".into() } else { "GPU timing: off".into() });
             let message = format!("{fps:.1} FPS · {frame_ms:.1} ms/frame\nRAM used {memory} MiB · iOS headroom {available} MiB\niOS app budget ≈ {} MiB · linear heap {heap}/{} MiB\nSelected {}×{} · presented {}×{}\nDraws/frame {} · GPU validation errors {}\nController: {}", memory + available, crate::game_heap_limit_mb(), render.0, render.1, self.surface_size.0, self.surface_size.1, (self.draws-self.hud_draws)/frames.max(1), self.errors.load(Ordering::Relaxed), if crate::pad::ACTIVE.load(Ordering::Relaxed) { "Connected" } else { "None" });
-            let message = format!("{message}\n{profile}\n{gpu}");
+            let message = format!("{message}\nPasses/f {:.1} · submits/f {:.1} · pending draws {}\n{profile}\n{gpu}", (self.passes-self.hud_passes) as f64 / frames.max(1) as f64, (self.submits-self.hud_submits) as f64 / frames.max(1) as f64, self.pending_skips-self.hud_pending);
             if let Ok(c) = std::ffi::CString::new(message) {
                 extern "C" { fn muguet_hud_update(text: *const std::ffi::c_char); }
                 unsafe { muguet_hud_update(c.as_ptr()); }
             }
             self.hud_time = Instant::now(); self.hud_frames = self.visible_frames; self.hud_draws = self.draws;
+            self.hud_passes = self.passes; self.hud_submits = self.submits; self.hud_pending = self.pending_skips;
         }
     }
 
     fn log_fps(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.fps_t0).as_secs_f64();
-        if dt >= 10.0 {
+        if dt >= if START.elapsed().as_secs() < 60 { 2.0 } else { 10.0 } {
             let frames = self.presents - self.fps_n0;
             log(&format!(
                 "fps: {:.1} ({} MB memory, game heap {} MB, {} frames, {} clears folded, {} draws/frame, {} draws waiting for a compiling pipeline, {:.1} submits/frame, {:.1} passes/frame, {} skipped total, pipelines {}, bind groups cached {}, validation errors {})",

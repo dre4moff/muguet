@@ -295,6 +295,12 @@ pub(crate) struct BufferTracker {
 }
 
 impl BufferTracker {
+    pub fn clear(&mut self) {
+        for i in self.metadata.owned_indices() {
+            self.start[i] = BufferUses::empty(); self.end[i] = BufferUses::empty();
+        }
+        self.metadata.clear(); self.temp.clear();
+    }
     pub fn new(ordered_uses_mask: BufferUses) -> Self {
         Self {
             start: Vec::new(),

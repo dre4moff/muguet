@@ -438,6 +438,14 @@ pub(crate) struct TextureTracker {
 }
 
 impl TextureTracker {
+    pub fn clear(&mut self) {
+        for i in self.metadata.owned_indices() {
+            self.start_set.simple[i] = TextureUses::UNINITIALIZED;
+            self.end_set.simple[i] = TextureUses::UNINITIALIZED;
+        }
+        self.start_set.complex.clear(); self.end_set.complex.clear();
+        self.metadata.clear(); self.temp.clear();
+    }
     pub fn new(ordered_uses_mask: TextureUses) -> Self {
         Self {
             start_set: TextureStateSet::new(),

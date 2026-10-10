@@ -78,7 +78,7 @@ pub(crate) use self::{
     },
 };
 
-pub(crate) use allocator::CommandAllocator;
+pub(crate) use allocator::{CommandAllocator, PooledTracker};
 
 /// cbindgen:ignore
 pub use self::{compute_command::ComputeCommand, render_command::RenderCommand};
@@ -826,7 +826,7 @@ impl Drop for InnerCommandEncoder {
 /// the fields in this struct. This is the "built" counterpart to that type.
 pub(crate) struct BakedCommands {
     pub(crate) encoder: InnerCommandEncoder,
-    pub(crate) trackers: Tracker,
+    pub(crate) trackers: PooledTracker,
     pub(crate) temp_resources: Vec<TempResource>,
     pub(crate) indirect_draw_validation_resources: crate::indirect_validation::DrawResources,
     buffer_memory_init_actions: Vec<BufferInitTrackerAction>,
@@ -844,7 +844,7 @@ pub struct CommandBufferMutable {
     pub(crate) encoder: InnerCommandEncoder,
 
     /// All the resources that the commands recorded so far have referred to.
-    pub(crate) trackers: Tracker,
+    pub(crate) trackers: PooledTracker,
 
     /// The regions of buffers and textures these commands will read and write.
     ///
@@ -928,10 +928,7 @@ impl CommandEncoder {
                         api: EncodingApi::Undecided,
                         label: label.to_string(),
                     },
-                    trackers: Tracker::new(
-                        device.ordered_buffer_usages,
-                        device.ordered_texture_usages,
-                    ),
+                    trackers: device.command_allocator.acquire_tracker(device),
                     buffer_memory_init_actions: Default::default(),
                     texture_memory_actions: Default::default(),
                     as_actions: Default::default(),
