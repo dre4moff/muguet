@@ -4,8 +4,6 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
-import Metal
-import MetalFX
 
 let configURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("config.json")
@@ -18,8 +16,6 @@ final class Settings: ObservableObject {
     @Published var touch = 1.0
     @Published var controllerSensitivity = 1.5
     @Published var controllerDeadzone = 0.12
-    @Published var temporal = false
-    @Published var temporalRatio = 1.5
     @Published var performanceHUD = false
     @Published var mute = false
     @Published var multiplayer = false
@@ -32,6 +28,9 @@ final class Settings: ObservableObject {
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         extra = json
+        // Retire settings from removed experimental rendering. Preserve all others.
+        extra.removeValue(forKey: "metalfx_temporal")
+        extra.removeValue(forKey: "metalfx_ratio")
         if let v = json["start_mode"] as? Int, (1...2).contains(v) { mode = v }
         if let v = json["scale"] as? Double { scale = v }
         if let v = json["fps_limit"] as? Int { fps = v == 30 ? 30 : 60 }
@@ -39,8 +38,6 @@ final class Settings: ObservableObject {
         if let v = json["touch_sensitivity"] as? Double { touch = v }
         if let v = json["controller_sensitivity"] as? Double, v.isFinite { controllerSensitivity = min(4, max(0.25, v)) }
         if let v = json["controller_deadzone"] as? Double, v.isFinite { controllerDeadzone = min(0.30, max(0.05, v)) }
-        if let v = json["metalfx_temporal"] as? Bool { temporal = v && metalFXSupported }
-        if let v = json["metalfx_ratio"] as? Double, [1.5, 2.0].contains(v) { temporalRatio = v }
         if let v = json["performance_hud"] as? Bool { performanceHUD = v }
         if let v = json["mute"] as? Bool { mute = v }
         if let v = json["multiplayer"] as? Bool { multiplayer = v }
@@ -58,8 +55,6 @@ final class Settings: ObservableObject {
         json["touch_sensitivity"] = (touch * 100).rounded() / 100
         json["controller_sensitivity"] = controllerSensitivity
         json["controller_deadzone"] = controllerDeadzone
-        json["metalfx_temporal"] = temporal && metalFXSupported
-        json["metalfx_ratio"] = temporalRatio
         json["performance_hud"] = performanceHUD
         json["mute"] = mute
         json["multiplayer"] = multiplayer
@@ -70,13 +65,6 @@ final class Settings: ObservableObject {
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
     }
-}
-
-var metalFXSupported: Bool {
-    if #available(iOS 16.0, *), let device = MTLCreateSystemDefaultDevice() {
-        return MTLFXTemporalScalerDescriptor.supportsDevice(device)
-    }
-    return false
 }
 
 @_silgen_name("muguet_import")
@@ -138,7 +126,7 @@ struct LauncherView: View {
         HStack(spacing: 0) {
             VStack(spacing: 16) {
                 Text("Muguet").font(.largeTitle.weight(.bold))
-                Text("Fork r2").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("Fork r3").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !muguet_has_game_code() {
                     Text("This build has no game code: build it with ./make-ios.sh <game.zip>.")
                         .foregroundStyle(.red).font(.callout).multilineTextAlignment(.center)
@@ -177,18 +165,6 @@ struct LauncherView: View {
                     Text("60 fps").tag(60)
                 }
                 Section("Rendering") {
-                    Toggle("MetalFX Temporal (experimental)", isOn: $s.temporal)
-                        .disabled(!metalFXSupported)
-                    if !metalFXSupported {
-                        Text("Temporal upscaling is unavailable on this device.").font(.caption).foregroundStyle(.secondary)
-                    } else if s.temporal {
-                        Picker("MetalFX reconstruction", selection: $s.temporalRatio) {
-                            Text("1.5×").tag(1.5)
-                            Text("2×").tag(2.0)
-                        }.pickerStyle(.segmented)
-                        Text("Multiplies the selected render resolution without lowering it. 1.5× costs less; 2× produces a larger output. Motion estimation is experimental and can leave trails.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
                     Toggle("Performance HUD", isOn: $s.performanceHUD)
                     Text("The HUD shows RAM used, iOS memory headroom and the current linear heap / ceiling. A 3 GiB heap is not the app's memory limit. GPU resources also use the app's budget.")
                         .font(.caption).foregroundStyle(.secondary)

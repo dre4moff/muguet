@@ -644,7 +644,6 @@ pub struct Gpu {
     surface: Option<(Surface<'static>, Arc<winit::window::Window>)>,
     surface_format: TextureFormat,
     surface_size: (u32, u32),
-    temporal: Option<crate::temporal::Temporal>,
     hud_time: Instant,
     hud_frames: u64,
     visible_frames: u64,
@@ -800,19 +799,8 @@ impl Gpu {
             }
             Some(job_tx)
         };
-        let input_size = crate::input::size();
-        let input_size = (input_size.0 as u32, input_size.1 as u32);
-        let temporal = if std::env::var("MUGUET_METALFX_TEMPORAL").as_deref() == Ok("1") {
-            surface.as_ref().and_then(|_| {
-                let ratio = std::env::var("MUGUET_METALFX_RATIO").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| [1.5, 2.0].contains(v)).unwrap_or(1.5);
-                let output = crate::temporal::output_size(input_size, ratio, device.limits().max_texture_dimension_2d)?;
-                log(&format!("MetalFX {ratio}x: selected render {}x{} -> reconstruction {}x{}", input_size.0, input_size.1, output.0, output.1));
-                crate::temporal::Temporal::new(&device, &queue, input_size, output, FRAME_SLOTS)
-            })
-        } else { None };
-        if temporal.is_some() { log("MetalFX Temporal initialized (experimental image motion)"); }
         Ok(Gpu {
-            temporal, hud_time: Instant::now(), hud_frames: 0, visible_frames: 0, hud_draws: 0,
+            hud_time: Instant::now(), hud_frames: 0, visible_frames: 0, hud_draws: 0,
             instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
             objs: Vec::new(), enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
@@ -1346,10 +1334,7 @@ impl Gpu {
             Ok(s) => s,
             Err(e) => { log_once(&format!("nosrc{hash}"), &format!("shader source {hash}: {e}")); return None; }
         };
-        let (mut text, pack) = pack_uniforms(&source);
-        if stage == 0 && self.temporal.is_some() {
-            if let Some(jittered) = crate::temporal::inject_jitter(&text) { text = jittered; }
-        }
+        let (text, pack) = pack_uniforms(&source);
         let module = self.scoped(&format!("shader {label}"), |d| d.create_shader_module(ShaderModuleDescriptor { label: Some(&label), source: ShaderSource::Wgsl(text.as_str().into()) }))?;
         let info = parse_wgsl(&text);
         let mut consts = None;
@@ -2065,9 +2050,7 @@ impl Gpu {
         let label = format!("{} + {}", vs.label, ps.map(|p| p.label.as_str()).unwrap_or("-"));
         let bgl0 = if vs.info.bindings.iter().any(|b| b.group == 0) { self.bgl_for(vs, 0, 0).0 } else { self.empty_bgl() };
         let bgl1 = match ps { Some(p) if p.info.bindings.iter().any(|b| b.group == 1) => self.bgl_for(p, 1, 1).0, _ => self.empty_bgl() };
-        let mut groups = vec![Some(&bgl0), Some(&bgl1)];
-        if let Some(fx) = &self.temporal { groups.extend([None, Some(&fx.layout)]); }
-        let pl_layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor { label: None, bind_group_layouts: &groups, immediate_size: 0 });
+        let pl_layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl0), Some(&bgl1)], immediate_size: 0 });
         let remap = self.inter_stage_remap(vs, ps.map(|p| p.as_ref()));
         let vmod = self.vertex_module(vs, ps.map(|p| p.flat.as_slice()).unwrap_or(&[]), remap.as_ref())?;
 
@@ -2273,21 +2256,9 @@ impl Gpu {
             match self.buf(u(1)).and_then(|b| b.gpu.clone()) { Some(g) => { self.use_buf(u(1)); Some((g, u(2) as u64)) } None => { self.skip(); return } }
         } else { None };
 
-        let depth = self.tex(self.s.ds.tex).and_then(|t| {
-            let depth_state = self.state(self.s.dss.0)?;
-            let comparison = depth_state.words.get(2).copied().unwrap_or(8);
-            let size = crate::input::size();
-            if pi.width == size.0 as u32 && pi.height == size.1 as u32 && t.desc.samples == 1
-                && self.s.ds.mip == 0 && self.s.ds.slice == 0 && depth_state.words.first().copied() == Some(1)
-                && comparison != 8 && t.format.is_depth_stencil_format() {
-                Some((self.s.ds.tex, comparison == 5 || comparison == 7))
-            } else { None }
-        });
-        let jitter_group = self.temporal.as_mut().map(|fx| fx.scene_group(&self.queue, self.ubo_slot, depth));
         let st = &mut self.pass_st;
         let pass = self.pass.as_mut().unwrap();
         if st.pl != Some(pl.uid) { pass.set_pipeline(&pl.pipeline); st.pl = Some(pl.uid); }
-        if let Some(group) = jitter_group { pass.set_bind_group(3, &group, &[]); }
         for (i, g) in [g0, g1].into_iter().enumerate() {
             if let Some(g) = g {
                 let d = g.dyn_off.unwrap_or(u32::MAX);
@@ -2894,23 +2865,9 @@ impl Gpu {
         self.materialize_clears(id);
         let visible = !OCCLUDED.load(Ordering::Relaxed);
         if let (Some(t), Some(_), true) = (self.tex(id), self.surface.as_ref(), visible) {
-            let mut dimensions = (t.desc.w, t.desc.h);
-            let mut tex = t.tex.clone();
+            let (w, h) = (t.desc.w, t.desc.h);
+            let tex = t.tex.clone();
             self.end_pass();
-            let depth = self.temporal.as_ref().filter(|fx| !fx.failed && fx.input_size == dimensions).and_then(|fx| fx.depth)
-                .and_then(|(id, reversed)| self.tex(id).map(|t| (id, reversed, t.tex.clone())));
-            let mut scaled = false;
-            if let Some((depth_id, reversed, depth)) = depth {
-                self.encoder(); // Even an already-flushed frame must submit its producer signal.
-                self.temporal.as_mut().unwrap().prepare(&self.queue);
-                // Submit the producer, then wait on a GPU event in the native scaler.
-                self.flush();
-                let fx = self.temporal.as_mut().unwrap();
-                if fx.encode(&self.queue, &tex, &depth, depth_id, reversed) {
-                    tex = fx.output.clone(); dimensions = fx.output_size; scaled = true;
-                }
-            }
-            let (w, h) = dimensions;
             if self.surface_size != (w, h) {
                 let (surface, window) = self.surface.as_ref().unwrap();
                 let caps = surface.get_capabilities(&self.adapter);
@@ -2938,10 +2895,7 @@ impl Gpu {
             }
             let blit = self.blit.clone().unwrap();
             let dev = self.device.clone();
-            let bg = if scaled {
-                let view = tex.create_view(&TextureViewDescriptor::default());
-                dev.create_bind_group(&BindGroupDescriptor { label: Some("MetalFX presentation"), layout: &blit.get_bind_group_layout(0), entries: &[BindGroupEntry { binding: 0, resource: BindingResource::TextureView(&view) }] })
-            } else {
+            let bg = {
                 let t = self.tex_mut(id).unwrap();
                 t.blit_bg.get_or_insert_with(|| {
                     let v = tex.create_view(&TextureViewDescriptor { dimension: Some(TextureViewDimension::D2), base_mip_level: 0, mip_level_count: Some(1), base_array_layer: 0, array_layer_count: Some(1), ..Default::default() });
@@ -2980,7 +2934,6 @@ impl Gpu {
         PRESENTS.store(self.presents, Ordering::Relaxed);
         self.log_fps();
         self.update_hud();
-        if let Some(fx) = &mut self.temporal { fx.next_frame(); }
 
         self.frame_slot_done[self.ubo_slot] = self.last_submit.clone();
         self.ubo_slot = (self.ubo_slot + 1) % FRAME_SLOTS;
@@ -3001,18 +2954,10 @@ impl Gpu {
             let fps = frames as f64 / elapsed;
             let frame_ms = if frames > 0 { elapsed * 1000.0 / frames as f64 } else { 0.0 };
             let render = crate::input::size();
-            let fx = match &self.temporal {
-                Some(fx) if fx.failed => "Fallback (scaler failed)",
-                Some(fx) if fx.last_active() => "Temporal / estimated motion",
-                Some(_) => "Waiting for scene depth",
-                None if std::env::var("MUGUET_METALFX_TEMPORAL").as_deref() == Ok("1") => "Unavailable",
-                None => "Off",
-            };
             let memory = crate::footprint_mb();
             let available = crate::available_memory_mb();
             let heap = crate::RT.get().map(|r| r.mem.data_size() >> 20).unwrap_or(0);
-            let ratio = std::env::var("MUGUET_METALFX_RATIO").unwrap_or_else(|_| "1.5".into());
-            let message = format!("{fps:.1} FPS · {frame_ms:.1} ms/frame\nRAM used {memory} MiB · iOS headroom {available} MiB\niOS app budget ≈ {} MiB · linear heap {heap}/{} MiB\nRender {}×{} → output {}×{}\nMetalFX {ratio}×: {fx}\nDraws/frame {} · GPU validation errors {}\nController: {}", memory + available, crate::game_heap_limit_mb(), render.0, render.1, self.surface_size.0, self.surface_size.1, (self.draws-self.hud_draws)/frames.max(1), self.errors.load(Ordering::Relaxed), if crate::pad::ACTIVE.load(Ordering::Relaxed) { "Connected" } else { "None" });
+            let message = format!("{fps:.1} FPS · {frame_ms:.1} ms/frame\nRAM used {memory} MiB · iOS headroom {available} MiB\niOS app budget ≈ {} MiB · linear heap {heap}/{} MiB\nSelected {}×{} · presented {}×{}\nDraws/frame {} · GPU validation errors {}\nController: {}", memory + available, crate::game_heap_limit_mb(), render.0, render.1, self.surface_size.0, self.surface_size.1, (self.draws-self.hud_draws)/frames.max(1), self.errors.load(Ordering::Relaxed), if crate::pad::ACTIVE.load(Ordering::Relaxed) { "Connected" } else { "None" });
             if let Ok(c) = std::ffi::CString::new(message) {
                 extern "C" { fn muguet_hud_update(text: *const std::ffi::c_char); }
                 unsafe { muguet_hud_update(c.as_ptr()); }
@@ -3083,4 +3028,37 @@ fn error_chain(e: &dyn std::error::Error) -> String {
         cur = c.source();
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn original_vertex_programs_pass_gpu_validation() {
+        let mut descriptor = InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = Backends::METAL;
+        let instance = Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions::default())).unwrap();
+        let features = Features::CLIP_DISTANCES | Features::DUAL_SOURCE_BLENDING | Features::DEPTH32FLOAT_STENCIL8 | Features::FLOAT32_FILTERABLE | Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        let (device, _) = pollster::block_on(adapter.request_device(&DeviceDescriptor { required_features: adapter.features() & features, ..Default::default() })).unwrap();
+        let mut programs = vec!["@vertex fn main(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32> { return vec4<f32>(0.0,0.0,0.0,1.0); }".to_owned()];
+        if let Ok(path) = std::env::var("MUGUET_TEST_GAME_ZIP") {
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+            use std::io::Read;
+            for n in 0..archive.len() {
+                let mut entry = archive.by_index(n).unwrap();
+                if !entry.name().ends_with(".wgsl") { continue; }
+                let mut text = String::new(); entry.read_to_string(&mut text).unwrap();
+                if text.contains("@vertex") { programs.push(text); }
+            }
+        }
+        let total = programs.len();
+        for (i, source) in programs.into_iter().enumerate() {
+            let (text, _) = pack_uniforms(&source);
+            let scope = device.push_error_scope(ErrorFilter::Validation);
+            let _ = device.create_shader_module(ShaderModuleDescriptor { label: Some("original vertex validation"), source: ShaderSource::Wgsl(text.into()) });
+            assert!(pollster::block_on(scope.pop()).is_none(), "Vertex shader {i} failed original-path validation");
+        }
+        eprintln!("Validated original rendering path for {total} vertex programs");
+    }
 }

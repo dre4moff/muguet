@@ -1,7 +1,7 @@
 # Muguet
 A native Mach-O iOS/macOS port of GTA V, with multiplayer
 
-This is dre4moff's independent **fork r2 (0.1.2)**. See [FORK.md](FORK.md) for MetalFX Temporal, the performance HUD, physical controller fixes, automatic ZIP cleanup, personal unsigned builds, validation and publication scope. Original documentation follows.
+This is dre4moff's independent **fork r3 (0.1.3)**. See [FORK.md](FORK.md) for the restored original rendering path, the performance HUD, physical controller fixes, automatic ZIP cleanup, personal unsigned builds, validation and publication scope. Original documentation follows.
 
 ## How does this work ?
 this whole port relies on the WebAssembly compilation of the game. in a browser, that `game.wasm` runs inside the JS engine, behind WebGPU, Web Audio, web workers...

@@ -14,7 +14,7 @@ fn main() {
     }
     println!("cargo:rustc-link-arg-bins=-Wl,-segprot,__GAME,rx,rx");
 
-    let sources = ["ios/Launcher.swift", "ios/PerformanceHUD.swift", "ios/SourceArchiveCleanup.swift", "ios/TemporalUpscaler.swift"];
+    let sources = ["ios/Launcher.swift", "ios/PerformanceHUD.swift", "ios/SourceArchiveCleanup.swift"];
     for source in sources { println!("cargo:rerun-if-changed={source}"); }
     let out = std::env::var("OUT_DIR").unwrap();
     let xcrun = |args: &[&str]| {
@@ -34,7 +34,6 @@ fn main() {
     assert!(status.success(), "swiftc failed");
     println!("cargo:rustc-link-search=native={out}");
     println!("cargo:rustc-link-lib=static=muguetlauncher");
-    println!("cargo:rustc-link-arg=-Wl,-weak_framework,MetalFX");
 
     println!("cargo:rustc-link-search=native={sdk}/usr/lib/swift");
     let toolchain = std::path::Path::new(&swiftc).parent().unwrap().parent().unwrap().join("lib/swift/iphoneos");
