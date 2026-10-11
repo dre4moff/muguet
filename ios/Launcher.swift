@@ -129,7 +129,7 @@ struct LauncherView: View {
         HStack(spacing: 0) {
             VStack(spacing: 16) {
                 Text("Muguet").font(.largeTitle.weight(.bold))
-                Text("Fork r5").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("0.1 performance fix").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !muguet_has_game_code() {
                     Text("This build has no game code: build it with ./make-ios.sh <game.zip>.")
                         .foregroundStyle(.red).font(.callout).multilineTextAlignment(.center)

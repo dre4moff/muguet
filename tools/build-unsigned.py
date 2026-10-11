@@ -27,14 +27,14 @@ if not args.xcodegen:
 GAME_WASM = args.game_wasm.resolve()
 
 BUILD = ROOT / '.build'
-STATE = BUILD / 'logs/fork-r5-ipa-build-state.json'
+STATE = BUILD / 'logs/performance-fix-ipa-build-state.json'
 TOOLCHAIN = '1.98.1'
 GAME_CODE = BUILD / 'work/game.cwasm'
 TARGET = BUILD / 'target-ios'
 PROJECT = BUILD / 'work/ios-project'
 DERIVED = BUILD / 'xcode-derived-data'
 STAGE = BUILD / 'work/ipa-stage'
-IPA = BUILD / 'artifacts/fork-r5/Muguet-0.1.5-fork-r5-ios-arm64-unsigned.ipa'
+IPA = BUILD / 'artifacts/performance-fix/0.1 performance fix.ipa'
 ENV = os.environ.copy()
 ENV.update({
     'RUSTUP_HOME': str(BUILD / 'rustup-home'),
@@ -56,7 +56,7 @@ def state(phase, **fields):
 def run(phase, command, reserve_mib=1024, env=None):
     if not check(reserve_mib * 1024**2)['passed']:
         raise RuntimeError(f'Disk guard stopped {phase}.')
-    log_path = BUILD / f'logs/r5-{phase}.log'
+    log_path = BUILD / f'logs/performance-fix-{phase}.log'
     print(f'Starting {phase}.', flush=True)
     with log_path.open('wb') as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env or ENV,
@@ -144,9 +144,9 @@ try:
     commands = output(['otool', '-l', str(executable)])
     if 'segname __GAME' not in commands:
         raise RuntimeError('The iOS executable does not contain embedded game code.')
-    (BUILD / 'logs/fork-r5-ios-executable-load-commands.txt').write_text(commands)
+    (BUILD / 'logs/performance-fix-ios-executable-load-commands.txt').write_text(commands)
     signature = subprocess.run(['codesign', '--display', str(app)], text=True, capture_output=True)
-    (BUILD / 'logs/fork-r5-ios-signature-status.txt').write_text(signature.stdout + signature.stderr)
+    (BUILD / 'logs/performance-fix-ios-signature-status.txt').write_text(signature.stdout + signature.stderr)
     if signature.returncode == 0 or 'LC_CODE_SIGNATURE' in commands:
         raise RuntimeError('The unsigned executable still contains a signature.')
     signature_folder = app / '_CodeSignature'
@@ -191,7 +191,7 @@ try:
               'wasm_optimization': '-O3' if optimizer_version else None, 'optimized_wasm_sha256': optimized_sha256,
               'sideload_signing_required': True, 'actual_device_tested': False, 'gameplay_tested': False}
     (IPA.parent / 'SHA256SUMS.txt').write_text(digest.hexdigest() + '  ' + IPA.name + '\n')
-    (BUILD / 'logs/fork-r5-ipa-verification.json').write_text(json.dumps(report, indent=2) + '\n')
+    (BUILD / 'logs/performance-fix-ipa-verification.json').write_text(json.dumps(report, indent=2) + '\n')
     state('complete', artifact=report)
     print(json.dumps(report), flush=True)
 except Exception as error:

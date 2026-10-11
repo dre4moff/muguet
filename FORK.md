@@ -1,6 +1,10 @@
-# Muguet fork r5 (0.1.5)
+# Muguet — 0.1 performance fix
 
 This fork starts from c22dev/Muguet commit `63737647eb3f7fee2e2139995606e3b02a5920ee`. The original author, copyright notices, GPL-3.0-or-later license, and vendored MIT/Apache licenses are retained. This is an independent modification by dre4moff, not an official Rockstar or upstream release.
+
+## Release identity
+
+The app is named **Muguet**. **0.1 performance fix** is the release/version label shown in the launcher, not the app name. This release restores the exact R5 implementation at `218381d8fd46143b6a0b4cb16a7e53dde2c070c8`, including its controller fixes, successful-import ZIP cleanup and opt-in performance HUD. The executable version is 0.1, build 7. No new performance experiment is included.
 
 ## Performance investigation
 
@@ -47,7 +51,7 @@ RUSTUP_HOME="$PWD/.build/rustup-home" CARGO_HOME="$PWD/.build/cargo-home" \
 python3 tools/build-unsigned.py /path/to/your/game.wasm --xcodegen /path/to/xcodegen --wasm-opt /path/to/wasm-opt
 ```
 
-Output: `.build/artifacts/fork-r5/Muguet-0.1.5-fork-r5-ios-arm64-unsigned.ipa` and SHA-256 evidence. The IPA is genuinely unsigned: signing and device installation are performed by the owner. Keep the upstream bundle identifier to preserve an existing installation's data (subject to your signing/install tool's behavior). The app retains the 5 GiB iOS heap ceiling and does not enable JIT. A current 3072 MiB heap means a 3 GiB linear-memory address range, not a 3 GiB process cap or necessarily 3 GiB of resident RAM. The ceiling does not force the game to allocate or use that much memory. Import the same compatible game-data ZIP; these changes do not require editing game-data files. One new pause-state export is added to the code embedded in the personal IPA.
+Output: `.build/artifacts/performance-fix/0.1 performance fix.ipa` and SHA-256 evidence. The IPA is genuinely unsigned: signing and device installation are performed by the owner. Keep the upstream bundle identifier to preserve an existing installation's data (subject to your signing/install tool's behavior). The app retains the 5 GiB iOS heap ceiling and does not enable JIT. A current 3072 MiB heap means a 3 GiB linear-memory address range, not a 3 GiB process cap or necessarily 3 GiB of resident RAM. The ceiling does not force the game to allocate or use that much memory. Import the same compatible game-data ZIP; these changes do not require editing game-data files. One new pause-state export is added to the code embedded in the personal IPA.
 
 ## iOS RAM and signing
 
