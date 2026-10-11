@@ -23,3 +23,18 @@ try Data([1]).write(to: nonZIP)
 do { _ = try SourceArchiveIdentity.read(nonZIP); fatalError("Non-ZIP accepted for deletion") }
 catch ArchiveCleanupError.identityUnavailable { }
 print("PASS: selected unchanged ZIP cleanup; modified ZIP and non-ZIP protection")
+
+let selected = directory.appendingPathComponent("Game Data.ZIP")
+let selectedArchive = try GameArchiveSelection.archive(from: [selected])
+require(selectedArchive == selected, "Selection must preserve the original provider URL")
+for urls in [[], [selected, original]] {
+    do { _ = try GameArchiveSelection.archive(from: urls); fatalError("Non-single selection accepted") }
+    catch GameArchiveSelectionError.chooseOneArchive { }
+}
+for url in [nonZIP, URL(string: "https://example.com/game.zip")!] {
+    do { _ = try GameArchiveSelection.archive(from: [url]); fatalError("Non-file or non-ZIP accepted") }
+    catch GameArchiveSelectionError.notZIP { }
+}
+require(FileManager.default.fileExists(atPath: original.path), "Rejected selection must leave archives untouched")
+require(FileManager.default.fileExists(atPath: nonZIP.path), "Rejected selection must leave other files untouched")
+print("PASS: single original ZIP URL, uppercase extension; empty/multiple/non-ZIP/remote rejection without deletion")

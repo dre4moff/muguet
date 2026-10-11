@@ -2,5 +2,5 @@
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p .build/work .build/logs
-xcrun swiftc -O -o .build/work/native-tests ios/SourceArchiveCleanup.swift tests/native/main.swift
+xcrun swiftc -O -o .build/work/native-tests ios/SourceArchiveCleanup.swift ios/GameArchiveSelection.swift tests/native/main.swift
 .build/work/native-tests

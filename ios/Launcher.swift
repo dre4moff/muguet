@@ -3,7 +3,6 @@
 
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 
 let configURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("config.json")
@@ -123,6 +122,7 @@ struct LauncherView: View {
     @ObservedObject private var importer = Importer.shared
     @State private var error: String?
     @State private var picking = false
+    @State private var pickedArchives: [URL]?
     let play: () -> Void
 
     var body: some View {
@@ -137,11 +137,13 @@ struct LauncherView: View {
                     importView
                 } else {
                     if let error { Text(error).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
+                    if let message = importer.error { Text(message).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
                     playButton
                     if let notice = importer.cleanupNotice {
                         Text(notice).font(.caption).foregroundStyle(.orange)
                     }
-                    Button("Import other game data…") { picking = true }.font(.caption)
+                    Button("Import other game data…", action: pickArchive).font(.caption)
+                    Text("Select one ZIP, then tap Open.").font(.caption).foregroundStyle(.secondary)
                 }
                 Text("proudly made by c22dev").font(.caption).foregroundStyle(.secondary)
             }
@@ -220,8 +222,11 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
         }
         .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.zip]) { result in
-            if case .success(let url) = result { importer.run(url) }
+        .fullScreenCover(isPresented: $picking, onDismiss: importSelectedArchive) {
+            GameArchivePicker { urls in
+                pickedArchives = urls
+                picking = false
+            }
         }
     }
 
@@ -231,13 +236,30 @@ struct LauncherView: View {
                 ProgressView(value: p)
                 Text("Importing… \(Int(p * 100)) %").font(.callout).monospacedDigit()
             } else {
-                Button("Import game data .zip") { picking = true }
+                Button("Import game data .zip", action: pickArchive)
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                 Text("The selected ZIP is deleted after a successful import to recover storage.")
                     .font(.caption).foregroundStyle(.secondary)
+                Text("Select one ZIP, then tap Open.").font(.caption).foregroundStyle(.secondary)
             }
             if let e = importer.error { Text(e).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
+        }
+    }
+
+    func pickArchive() {
+        pickedArchives = nil
+        importer.error = nil
+        picking = true
+    }
+
+    func importSelectedArchive() {
+        guard let urls = pickedArchives else { return }
+        pickedArchives = nil
+        do {
+            importer.run(try GameArchiveSelection.archive(from: urls))
+        } catch {
+            importer.error = error.localizedDescription
         }
     }
 
