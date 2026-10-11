@@ -4,7 +4,9 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() { fatalError(message) }
 }
 
-let directory = FileManager.default.temporaryDirectory.appendingPathComponent("muguet-native-tests-\(UUID().uuidString)")
+let testRoot = ProcessInfo.processInfo.environment["MUGUET_NATIVE_TEST_TEMP_ROOT"]
+    .map { URL(fileURLWithPath: $0, isDirectory: true) } ?? FileManager.default.temporaryDirectory
+let directory = testRoot.resolvingSymlinksInPath().appendingPathComponent("muguet-native-tests-\(UUID().uuidString)")
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: directory) }
 let original = directory.appendingPathComponent("original.zip")
@@ -38,3 +40,27 @@ for url in [nonZIP, URL(string: "https://example.com/game.zip")!] {
 require(FileManager.default.fileExists(atPath: original.path), "Rejected selection must leave archives untouched")
 require(FileManager.default.fileExists(atPath: nonZIP.path), "Rejected selection must leave other files untouched")
 print("PASS: single original ZIP URL, uppercase extension; empty/multiple/non-ZIP/remote rejection without deletion")
+
+try Data([5,6,7]).write(to: selected)
+let hidden = directory.appendingPathComponent(".hidden.zip")
+try Data([8]).write(to: hidden)
+let fakeZIP = directory.appendingPathComponent("directory.zip")
+try FileManager.default.createDirectory(at: fakeZIP, withIntermediateDirectories: false)
+let link = directory.appendingPathComponent("link.zip")
+try FileManager.default.createSymbolicLink(at: link, withDestinationURL: selected)
+let nested = directory.appendingPathComponent("nested")
+try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+try Data([9]).write(to: nested.appendingPathComponent("nested.zip"))
+let archives = try GameArchiveSelection.localArchives(in: directory)
+require(Set(archives.map { $0.path }) == Set([selected.path, original.path]), "Local import must list only visible regular ZIPs in the app folder")
+let readBytes = try GameArchiveAccess.read(selected) { try Data(contentsOf: $0) }
+require(readBytes == Data([5,6,7]), "Coordinated read must deliver the selected file bytes")
+enum TestFailure: Error { case failedImport }
+do {
+    try GameArchiveAccess.read(selected) { _ in throw TestFailure.failedImport }
+    fatalError("Import failure was swallowed")
+} catch TestFailure.failedImport { }
+require(FileManager.default.fileExists(atPath: selected.path), "Failed coordinated import must retain source")
+try SourceArchiveIdentity.read(selected).removeUnchangedArchive(at: selected)
+require(!FileManager.default.fileExists(atPath: selected.path), "Coordinated successful cleanup must remove unchanged source")
+print("PASS: app-folder ZIP discovery excludes hidden/nested/symlink/directory entries; coordinated read, failure retention and deletion")

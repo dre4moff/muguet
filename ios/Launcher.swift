@@ -86,18 +86,32 @@ final class Importer: ObservableObject {
     @Published var cleanupNotice: String?
 
     func run(_ url: URL) {
+        guard progress == nil else { return }
         error = nil
         cleanupNotice = nil
         progress = 0
+        NSLog("[muguet-import] import worker requested")
         DispatchQueue.global(qos: .userInitiated).async {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let originalIdentity = try? SourceArchiveIdentity.read(url)
-            let ok = url.path.withCString { muguet_import($0) { done, total in
-                let p = total > 0 ? Double(done) / Double(total) : 0
-                DispatchQueue.main.async { Importer.shared.progress = p }
-            } }
-            let message = ok ? nil : muguet_import_error().map { String(cString: $0) } ?? "unknown error"
+            var originalIdentity: SourceArchiveIdentity?
+            let ok: Bool
+            let message: String?
+            do {
+                ok = try GameArchiveAccess.read(url) { coordinatedURL in
+                    originalIdentity = try? SourceArchiveIdentity.read(coordinatedURL)
+                    NSLog("[muguet-import] coordinated ZIP read; starting native import")
+                    return coordinatedURL.path.withCString { muguet_import($0) { done, total in
+                        let p = total > 0 ? Double(done) / Double(total) : 0
+                        DispatchQueue.main.async { Importer.shared.progress = p }
+                    } }
+                }
+                message = ok ? nil : muguet_import_error().map { String(cString: $0) } ?? "unknown error"
+            } catch {
+                ok = false
+                message = error.localizedDescription
+            }
+            NSLog("[muguet-import] native import completed: %@", ok ? "success" : "failure")
             var cleanupMessage: String?
             if ok {
                 do {
@@ -121,15 +135,16 @@ struct LauncherView: View {
     @StateObject private var s = Settings()
     @ObservedObject private var importer = Importer.shared
     @State private var error: String?
-    @State private var picking = false
-    @State private var pickedArchives: [URL]?
+    @State private var showingLocalArchives = false
+    @State private var localArchives: [URL] = []
+    let archivePicker: GameArchivePicker
     let play: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 16) {
                 Text("Muguet").font(.largeTitle.weight(.bold))
-                Text("0.1 performance fix").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("0.1 performance fix · build 9").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !muguet_has_game_code() {
                     Text("This build has no game code: build it with ./make-ios.sh <game.zip>.")
                         .foregroundStyle(.red).font(.callout).multilineTextAlignment(.center)
@@ -144,6 +159,7 @@ struct LauncherView: View {
                     }
                     Button("Import other game data…", action: pickArchive).font(.caption)
                     Text("Select one ZIP, then tap Open.").font(.caption).foregroundStyle(.secondary)
+                    Button("ZIP already in Muguet…", action: pickLocalArchive).font(.caption)
                 }
                 Text("proudly made by c22dev").font(.caption).foregroundStyle(.secondary)
             }
@@ -222,11 +238,29 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
         }
         .preferredColorScheme(.dark)
-        .fullScreenCover(isPresented: $picking, onDismiss: importSelectedArchive) {
-            GameArchivePicker { urls in
-                pickedArchives = urls
-                picking = false
+        .sheet(isPresented: $showingLocalArchives) {
+            NavigationView {
+                List {
+                    Section {
+                        Text("In Files, move the ZIP to On My iPhone → Muguet. This imports it directly, without the Files picker.")
+                            .font(.callout)
+                    }
+                    if localArchives.isEmpty {
+                        Text("No ZIP found in the Muguet folder.").foregroundStyle(.secondary)
+                    }
+                    ForEach(localArchives, id: \.self) { url in
+                        Button(url.lastPathComponent) {
+                            showingLocalArchives = false
+                            importSelectedArchive([url])
+                        }
+                    }
+                }
+                .navigationTitle("ZIPs in Muguet")
+                .toolbar { ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showingLocalArchives = false }
+                } }
             }
+            .navigationViewStyle(.stack)
         }
     }
 
@@ -242,20 +276,36 @@ struct LauncherView: View {
                 Text("The selected ZIP is deleted after a successful import to recover storage.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Select one ZIP, then tap Open.").font(.caption).foregroundStyle(.secondary)
+                Button("ZIP already in Muguet…", action: pickLocalArchive).font(.caption)
             }
             if let e = importer.error { Text(e).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
         }
     }
 
     func pickArchive() {
-        pickedArchives = nil
         importer.error = nil
-        picking = true
+        importer.cleanupNotice = nil
+        archivePicker.present { result in
+            switch result {
+            case .success(let urls):
+                if let urls { importSelectedArchive(urls) }
+            case .failure(let error): importer.error = error.localizedDescription
+            }
+        }
     }
 
-    func importSelectedArchive() {
-        guard let urls = pickedArchives else { return }
-        pickedArchives = nil
+    func pickLocalArchive() {
+        importer.error = nil
+        importer.cleanupNotice = nil
+        do {
+            localArchives = try GameArchiveSelection.localArchives(in: configURL.deletingLastPathComponent())
+            showingLocalArchives = true
+        } catch {
+            importer.error = "Could not list local ZIPs: \(error.localizedDescription)"
+        }
+    }
+
+    func importSelectedArchive(_ urls: [URL]) {
         do {
             importer.run(try GameArchiveSelection.archive(from: urls))
         } catch {
@@ -305,10 +355,12 @@ func localIPs() -> [String] {
 public func muguetShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) {
     let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
     weak var sheet: UIViewController?
-    let host = UIHostingController(rootView: LauncherView(play: {
+    let archivePicker = GameArchivePicker()
+    let host = UIHostingController(rootView: LauncherView(archivePicker: archivePicker, play: {
         sheet?.dismiss(animated: true)
         done()
     }))
+    archivePicker.presenter = host
     sheet = host
     host.modalPresentationStyle = .fullScreen
     host.isModalInPresentation = true

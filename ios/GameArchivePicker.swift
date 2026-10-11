@@ -1,44 +1,56 @@
-import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-struct GameArchivePicker: UIViewControllerRepresentable {
-    let onSelection: ([URL]?) -> Void
+// Present the document picker itself, rather than embedding it as a child of
+// a SwiftUI cover. Retain the delegate until selection/cancellation completes.
+final class GameArchivePicker: NSObject, UIDocumentPickerDelegate {
+    weak var presenter: UIViewController?
+    private var picker: UIDocumentPickerViewController?
+    private var completion: ((Result<[URL]?, Error>) -> Void)?
 
-    func makeCoordinator() -> Coordinator { Coordinator(onSelection) }
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Providers may classify ZIPs as generic data. Validate the selected name
-        // separately, and let the native importer validate the archive contents.
+    func present(_ completion: @escaping (Result<[URL]?, Error>) -> Void) {
+        guard let presenter, presenter.viewIfLoaded?.window != nil,
+              presenter.presentedViewController == nil, picker == nil else {
+            completion(.failure(PickerError.unavailable))
+            return
+        }
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false)
-        // Use explicit selection + Open instead of relying on a single tap to
-        // dismiss the file browser. The import accepts exactly one archive.
         picker.allowsMultipleSelection = true
         picker.shouldShowFileExtensions = true
-        picker.delegate = context.coordinator
-        return picker
+        picker.modalPresentationStyle = .fullScreen
+        picker.delegate = self
+        self.picker = picker
+        self.completion = completion
+        NSLog("[muguet-import] presenting document picker")
+        presenter.present(picker, animated: true) { [weak picker] in
+            NSLog("[muguet-import] picker presented as modal: %@", picker?.presentingViewController != nil ? "yes" : "no")
+        }
     }
 
-    func updateUIViewController(_ picker: UIDocumentPickerViewController, context: Context) {}
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        NSLog("[muguet-import] document picker returned %ld URL(s)", urls.count)
+        finish(controller, urls: urls)
+    }
 
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        private let onSelection: ([URL]?) -> Void
-        private var completed = false
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        NSLog("[muguet-import] document picker cancelled")
+        finish(controller, urls: nil)
+    }
 
-        init(_ onSelection: @escaping ([URL]?) -> Void) { self.onSelection = onSelection }
+    private func finish(_ controller: UIDocumentPickerViewController, urls: [URL]?) {
+        guard controller === picker, let completion else { return }
+        self.completion = nil
+        picker = nil
+        controller.dismiss(animated: true)
+        // Deliver the selection directly. Import must not depend on a SwiftUI
+        // onDismiss callback or on UIKit's dismissal animation completion.
+        completion(.success(urls))
+    }
 
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            finish(urls)
-        }
-
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            finish(nil)
-        }
-
-        private func finish(_ urls: [URL]?) {
-            guard !completed else { return }
-            completed = true
-            onSelection(urls)
+    private enum PickerError: LocalizedError {
+        case unavailable
+        var errorDescription: String? {
+            "Could not open Files. Try again, or import a ZIP from the Muguet folder."
         }
     }
 }

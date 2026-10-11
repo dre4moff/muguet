@@ -27,7 +27,9 @@ struct SourceArchiveIdentity: Equatable {
         return Self(file: file.uint64Value, size: size.uint64Value, modified: modified)
     }
     func removeUnchangedArchive(at url: URL) throws {
-        guard try Self.read(url) == self else { throw ArchiveCleanupError.changed }
-        try FileManager.default.removeItem(at: url)
+        try GameArchiveAccess.delete(url) { coordinatedURL in
+            guard try Self.read(coordinatedURL) == self else { throw ArchiveCleanupError.changed }
+            try FileManager.default.removeItem(at: coordinatedURL)
+        }
     }
 }

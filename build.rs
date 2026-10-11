@@ -15,7 +15,7 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-Wl,-segprot,__GAME,rx,rx");
 
     let sources = ["ios/Launcher.swift", "ios/PerformanceHUD.swift", "ios/SourceArchiveCleanup.swift",
-                   "ios/GameArchivePicker.swift", "ios/GameArchiveSelection.swift"];
+                   "ios/GameArchivePicker.swift", "ios/GameArchiveSelection.swift", "ios/GameArchiveAccess.swift"];
     for source in sources { println!("cargo:rerun-if-changed={source}"); }
     let out = std::env::var("OUT_DIR").unwrap();
     let xcrun = |args: &[&str]| {

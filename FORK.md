@@ -4,7 +4,7 @@ This fork starts from c22dev/Muguet commit `63737647eb3f7fee2e2139995606e3b02a59
 
 ## Release identity
 
-The app is named **Muguet**. **0.1 performance fix** is the release/version label shown in the launcher, not the app name. The R5 implementation at `218381d8fd46143b6a0b4cb16a7e53dde2c070c8` is retained, including its controller fixes, successful-import ZIP cleanup and opt-in performance HUD. Build 8 changes only the archive-selection flow and its error reporting; renderer, controller, memory and embedded game code are unchanged. No new performance experiment is included. See [VALIDATION-import-fix.md](VALIDATION-import-fix.md).
+The app is named **Muguet**. **0.1 performance fix** is the release/version label shown in the launcher, not the app name. The R5 implementation at `218381d8fd46143b6a0b4cb16a7e53dde2c070c8` is retained, including its controller fixes, successful-import ZIP cleanup and opt-in performance HUD. Build 9 changes the archive-selection/access flow and adds direct import from the app's own Documents folder; renderer, controller, memory and embedded game code are unchanged. No new performance experiment is included. The launcher shows the build number to distinguish installed revisions. See [VALIDATION-import-build9.md](VALIDATION-import-build9.md).
 
 ## Performance investigation
 
@@ -36,9 +36,13 @@ The source establishes extra GPU work and unreliable motion reconstruction. It d
 
 ## ZIP import and storage
 
-Build 8 uses a native document picker with explicit selection and **Open** confirmation. Select one ZIP, then tap Open. The picker accepts generic data so that a provider's ZIP type classification does not exclude the archive; the app then requires exactly one local `.zip` URL, and the existing native importer validates the archive contents. Selecting multiple files or a different file type reports an error without importing or deleting anything. Cancellation does nothing. Selection/import errors also remain visible when game data was already installed.
+Build 8 still stalled on the owner's iPhone when confirming **Open**. Build 9 presents `UIDocumentPickerViewController` directly from the launcher hosting controller using UIKit `present`, rather than embedding the picker in a SwiftUI cover. The selection callback starts import directly; it no longer waits for SwiftUI `onDismiss` or a dismissal animation. The retained delegate handles selection/cancellation once, and busy/unavailable presentation reports an error.
 
-The document picker opens the provider's selected original URL (`asCopy: false`), avoiding a second full archive copy. Import starts after the picker closes, with the existing security-scoped access retained through extraction and cleanup. The owner's reported visible, non-gray ZIP that did not close the previous SwiftUI picker has not been reproduced on a device; the provider-specific cause is not established. This native selection path still needs an iPhone check.
+Select one ZIP, then tap Open. The picker accepts generic data so that a provider's ZIP type classification does not exclude the archive; the app then requires exactly one local `.zip` URL, and the existing native importer validates the archive contents. Selecting multiple files or a different file type reports an error without importing or deleting anything. Cancellation does nothing. Selection/import errors also remain visible when game data was already installed.
+
+**ZIP already in Muguet…** lists visible, regular `.zip` files directly in the app's Documents folder, excluding symlinks, directories and nested files. In Files, move a ZIP into **On My iPhone → Muguet**, then choose it using this launcher button. This path uses no system document picker. A ZIP already in that folder needs no move or second copy; no archive imports automatically or in bulk.
+
+The document picker opens the selected original URL (`asCopy: false`), avoiding a second full archive copy. The import worker retains security-scoped access and uses `NSFileCoordinator` for reading and deletion. Deletion is coordinated only after successful extraction/validation/promotion and an unchanged-source identity check. Apple's [document-picker guide](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/DocumentPickerProgrammingGuide/AccessingDocuments/AccessingDocuments.html) describes modal presentation and coordinated access to external documents. The old picker stall has not been reproduced with a device trace; presentation/lifecycle is a source-based diagnosis, not a confirmed device root cause. Both new UI paths still need an iPhone check.
 
 After extraction, validation and successful promotion of the imported game directory, the app deletes **only the selected ZIP**. The source identity is captured before importing and checked again before deletion; a changed source or failed import is retained. If Files/iCloud/provider permissions prevent deletion, game data stays ready and the launcher reports that the ZIP must be removed manually. Import deletion on a device/provider still needs acceptance.
 
@@ -69,7 +73,7 @@ Apple references: [available app memory](https://developer.apple.com/documentati
 
 ## Checks and device acceptance
 
-`sh tools/test-native.sh` checks single-ZIP selection and ZIP cleanup protection without loading a reconstruction framework. `cargo +1.98.1 test --locked --release --jobs 2 --bin muguet` checks controller filtering/mapping and original vertex shader validation after the normal uniform packing step. Setting `MUGUET_TEST_GAME_ZIP` additionally validates every original vertex shader in your own archive without modifying it.
+`sh tools/test-native.sh` checks single-ZIP selection, app-folder discovery, coordinated reads/deletion and ZIP cleanup protection without loading a reconstruction framework. Test output/fixtures stay in `.build`. `cargo +1.98.1 test --locked --release --jobs 2 --bin muguet` checks controller filtering/mapping and original vertex shader validation after the normal uniform packing step. Setting `MUGUET_TEST_GAME_ZIP` additionally validates every original vertex shader in your own archive without modifying it.
 
 The local release report records compilation, checksums and unsigned packaging checks. Those checks do not establish gameplay, performance improvement, controller behavior or ZIP-provider deletion on an iPhone. The previously working upstream IPA is kept as a separate rollback artifact.
 
